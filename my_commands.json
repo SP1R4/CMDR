@@ -1,0 +1,7 @@
+{
+  "updates_check": "apt update && apt upgrade -y",
+  "shutdown": "sudo shutdown -h now",
+  "nc_listener": "nc -lvnp 2001",
+  "cleaning": "history -c && history -w ; sudo rm -rf /tmp/* /var/tmp/* /var/log/*",
+  "pyserver": "python3 -m http.server 3333"
+}
