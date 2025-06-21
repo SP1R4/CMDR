@@ -1,7 +1,26 @@
 {
-  "updates_check": "apt update && apt upgrade -y",
-  "shutdown": "sudo shutdown -h now",
-  "nc_listener": "nc -lvnp 2001",
-  "cleaning": "history -c && history -w ; sudo rm -rf /tmp/* /var/tmp/* /var/log/*",
-  "pyserver": "python3 -m http.server 3333"
+  "updates_check": {
+    "command": "apt update && apt upgrade -y",
+    "category": "default"
+  },
+  "shutdown": {
+    "command": "sudo shutdown -h now",
+    "category": "default"
+  },
+  "nc_listener": {
+    "command": "nc -lvnp 2001",
+    "category": "default"
+  },
+  "cleaning": {
+    "command": "history -c && history -w ; sudo rm -rf /tmp/* /var/tmp/* /var/log/*",
+    "category": "default"
+  },
+  "pyserver": {
+    "command": "python3 -m http.server 3333",
+    "category": "default"
+  },
+  "ls-l": {
+    "command": "sysadmin",
+    "category": "default"
+  }
 }
