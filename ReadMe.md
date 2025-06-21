@@ -1,88 +1,129 @@
+# CMDR - Command Manager
 
-# Command Manager Script
-
-## Overview
-
-The Command Manager Script allows you to manage and execute custom commands easily. You can add, delete, run, and list commands stored in a JSON file. This script is designed for use in a Linux environment and requires `jq` for JSON manipulation.
+CMDR is a Bash-based command management tool designed to store, organize, and execute shell commands securely. It allows users to tag commands, categorize them, and run them interactively or via command-line arguments. Built with security in mind, CMDR includes input sanitization to prevent command injection vulnerabilities and uses JSON for persistent storage.
 
 ## Features
 
-- **Add a Command**: Store custom commands with a unique tag.
-- **Delete a Command**: Remove commands using their tag.
-- **Show Commands**: List all available commands.
-- **Run a Command**: Execute a stored command.
-- **Extract Commands**: Save all commands to a specified output file.
-- **Extract Logs**: Save the command execution logs to a specified file.
-- **Install Commands**: Load commands from a specified input file.
+- **Command Storage**: Save shell commands with unique tags in a JSON file (`my_commands.json`).
+- **Categorization**: Organize commands into custom categories (e.g., `dev`, `sysadmin`).
+- **Input Sanitization**: 
+  - Blocks dangerous characters (`;` and `|`) in commands to prevent injection.
+  - Restricts tags to alphanumeric characters, underscores, and hyphens.
+- **Interactive Mode**: Browse and execute commands via a menu-driven interface.
+- **Validation**: Ensures commands are executable, with an option to override for non-executable commands.
+- **Logging**: Supports `DEBUG`, `INFO`, and `ERROR` logging levels for troubleshooting.
+- **Locking**: Prevents concurrent runs using a lock file.
+- **Export/Import**: Extract commands to a JSON file or install from a JSON file.
+- **Modular Design**: Separates core logic (`cmdr.sh`) and functions (`cmdr_functions.sh`) for maintainability.
+
+## Installation
+
+1. **Clone the Repository**:
+   ```bash
+   git clone (https://github.com/SP1R4/CMDR)
+   cd CMDR
+   ```
+
+2. **Set Permissions**:
+   Ensure the scripts and JSON file are executable and writable:
+   ```bash
+   chmod +x cmdr.sh cmdr_functions.sh
+   chmod 666 my_commands.json commands_log.log
+   ```
+
+3. **Install Dependencies**:
+   CMDR requires `jq` for JSON processing. Install it on Ubuntu/Debian:
+   ```bash
+   sudo apt-get update
+   sudo apt-get install jq
+   ```
+
+4. **Run with Sudo**:
+   Due to file permissions, run the script with `sudo`:
+   ```bash
+   sudo ./cmdr.sh -h
+   ```
 
 ## Usage
 
-To run the script, use the following command:
+Run `cmdr.sh` with the following options:
 
 ```bash
-sudo ./cmdr.sh [options]
+sudo ./cmdr.sh [-a <tag> <command> [category]] [-d <tag>] [-s] [-r <tag>] [-x <output_file>] [-l <output_file>] [-i <input_file>] [-m] [-v] [-h]
 ```
 
 ### Options
 
-- `-a <tag> <command>`: Add a new command with the specified tag.
-- `-d <tag>`: Delete the command associated with the specified tag.
-- `-s`: Show available commands.
-- `-r <tag>`: Run the command associated with the specified tag.
-- `-x <output_file>`: Extract commands to the specified output file.
-- `-l <output_file>`: Extract logs to the specified output file.
-- `-i <input_file>`: Install commands from the specified input file.
-- `-h`: Display help message.
+- `-a <tag> <command> [category]`: Add a command with a tag and optional category (default: `default`).
+- `-d <tag>`: Delete the command with the specified tag.
+- `-s`: Show commands grouped by category.
+- `-r <tag>`: Run the command with the specified tag.
+- `-x <output_file>`: Extract commands to a JSON file.
+- `-l <output_file>`: Extract logs to a file.
+- `-i <input_file>`: Install commands from a JSON file.
+- `-m`: Enter interactive mode to browse and run commands.
+- `-v`: Enable debug logging (default: info).
+- `-h`: Display help message with ASCII art.
 
 ### Examples
 
-1. **Add a new command**:
+1. **Add a command**:
    ```bash
-   sudo ./cmdr.sh -a mycmd 'echo Hello'
+   sudo ./cmdr.sh -a mycmd 'echo Hello' dev
+   ```
+   Output:
+   ```
+   Validation passed: 'echo' found.
+   Command added successfully: 'mycmd' in category 'dev'.
    ```
 
-2. **Delete a command**:
-   ```bash
-   sudo ./cmdr.sh -d mycmd
-   ```
-
-3. **Show available commands**:
-   ```bash
-   sudo ./cmdr.sh -s
-   ```
-
-4. **Run a command**:
+2. **Run a command**:
    ```bash
    sudo ./cmdr.sh -r mycmd
    ```
-
-5. **Extract commands to a file**:
-   ```bash
-   sudo ./cmdr.sh -x extracted_commands.json
+   Output:
+   ```
+   Running command: echo Hello
+   Hello
    ```
 
-6. **Extract logs to a file**:
+3. **Show commands**:
    ```bash
-   sudo ./cmdr.sh -l commands_log.log
+   sudo ./cmdr.sh -s
+   ```
+   Output:
+   ```
+   Available commands by category:
+   Category: dev
+     mycmd: echo Hello
    ```
 
-7. **Install commands from a file**:
+4. **Delete a command**:
    ```bash
-   sudo ./cmdr.sh -i commands_to_install.json
+   sudo ./cmdr.sh -d mycmd
+   ```
+   Output:
+   ```
+   Command 'mycmd' deleted successfully.
    ```
 
-## Requirements
+5. **Interactive mode**:
+   ```bash
+   sudo ./cmdr.sh -m
+   ```
+   Output:
+   ```
+   Interactive Mode (select 'exit' to quit):
+   Categories:
+   1) dev
+   2) exit
+   ```
 
-- **Bash**: Ensure you're running a compatible shell.
-- **jq**: Install `jq` for JSON processing:
-  ```bash
-  sudo apt-get install jq  # For Debian-based systems
-  ```
-
-## Locking Mechanism
-
-The script employs a locking mechanism to prevent multiple instances from running simultaneously. A lock file is created in the user's home directory (`$HOME/command_manager.lock`). 
-
-## Temporary File Cleanup
-
-The script performs cleanup of temporary files created during command manipulation to avoid clutter.
+6. **Enable debug logging**:
+   ```bash
+   sudo ./cmdr.sh -v -a list_dir 'ls -l' sysadmin
+   ```
+   Check logs:
+   ```bash
+   cat commands_log.log
+   ```
