@@ -1,13 +1,9 @@
-[2024-03-30 16:44:25] Added command with tag 'updates_check': apt update && apt upgrade -y
-[2024-03-30 16:46:38] Ran command with tag 'updates_check': apt update && apt upgrade -y
-[2024-03-30 16:47:37] Added command with tag 'shutdown': sudo shutdown -h now
-[2024-03-31 13:57:48] Added command with tag 'nc_listener': nc -lvnp 2001
-[2024-03-31 14:02:06] Added command with tag 'cleaning': history -c && history -w ; sudo rm -rf /tmp/* /var/tmp/* /var/log/*
-[2024-03-31 14:03:27] Added command with tag 'http_server': python3 -m http.server
-[2024-03-31 14:03:50] Ran command with tag 'http_server': python3 -m http.server
-[2024-04-06 10:43:51] Ran command with tag 'updates_check': apt update && apt upgrade -y
-[2024-04-14 11:16:22] Ran command with tag 'updates_check': apt update && apt upgrade -y
-[2024-10-12 19:09:42] Ran command with tag 'pyserver': python3 -m http.server
-[2024-10-12 19:09:59] Ran command with tag 'pyserver': python3 -m http.server
-[2024-10-12 19:10:01] Ran command with tag 'pyserver': python3 -m http.server
-[2024-10-12 19:10:39] Ran command with tag 'pyserver': python3 -m http.server 3333
+[2025-06-21 16:33:19] [ERROR] Command 'list_dir' not found
+[2025-06-21 16:33:19] [DEBUG] Lock released (PID 28276)
+[2025-06-21 16:33:41] [DEBUG] Verbosity set to DEBUG
+[2025-06-21 16:33:41] [DEBUG] Entering add_command: tag='', command='', category='default'
+[2025-06-21 16:33:41] [DEBUG] Sanitizing tag: ''
+[2025-06-21 16:33:41] [DEBUG] Sanitizing input: '' (type: tag, raw bytes: )
+[2025-06-21 16:33:41] [ERROR] Invalid tag '': only alphanumeric, underscores, hyphens allowed
+[2025-06-21 16:33:41] [ERROR] Tag sanitization failed for '[0;31mError:[0m Invalid tag ''. Use alphanumeric, underscores, or hyphens.'
+[2025-06-21 16:33:41] [DEBUG] Lock released (PID 28339)
