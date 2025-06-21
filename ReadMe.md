@@ -20,7 +20,7 @@ CMDR is a Bash-based command management tool designed to store, organize, and ex
 
 1. **Clone the Repository**:
    ```bash
-   git clone (https://github.com/SP1R4/CMDR)
+   git clone https://github.com/SP1R4/CMDR
    cd CMDR
    ```
 
