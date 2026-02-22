@@ -1,26 +1,70 @@
 {
-  "updates_check": {
-    "command": "apt update && apt upgrade -y",
-    "category": "default"
+  "sysupdate": {
+    "command": "sudo apt update && sudo apt upgrade -y",
+    "category": "sysadmin"
   },
-  "shutdown": {
-    "command": "sudo shutdown -h now",
-    "category": "default"
+  "diskusage": {
+    "command": "df -h --total",
+    "category": "sysadmin"
   },
-  "nc_listener": {
-    "command": "nc -lvnp 2001",
-    "category": "default"
+  "meminfo": {
+    "command": "free -h",
+    "category": "sysadmin"
   },
-  "cleaning": {
-    "command": "history -c && history -w ; sudo rm -rf /tmp/* /var/tmp/* /var/log/*",
-    "category": "default"
+  "ports": {
+    "command": "ss -tulnp",
+    "category": "network"
   },
-  "pyserver": {
-    "command": "python3 -m http.server 3333",
-    "category": "default"
+  "myip": {
+    "command": "curl -s ifconfig.me && echo",
+    "category": "network"
   },
-  "ls-l": {
-    "command": "sysadmin",
-    "category": "default"
+  "pingg": {
+    "command": "ping -c 4 8.8.8.8",
+    "category": "network"
+  },
+  "httpserver": {
+    "command": "python3 -m http.server 8080",
+    "category": "dev"
+  },
+  "gitlog": {
+    "command": "git log --oneline --graph -20",
+    "category": "dev"
+  },
+  "gitstatus": {
+    "command": "git status -sb",
+    "category": "dev"
+  },
+  "dps": {
+    "command": "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'",
+    "category": "docker"
+  },
+  "dstop": {
+    "command": "docker stop $(docker ps -q)",
+    "category": "docker"
+  },
+  "topproc": {
+    "command": "ps aux --sort=-%mem | head -15",
+    "category": "sysadmin"
+  },
+  "flushdns": {
+    "command": "sudo systemd-resolve --flush-caches",
+    "category": "network"
+  },
+  "weather": {
+    "command": "curl -s wttr.in/?format=3",
+    "category": "misc"
+  },
+  "genpass": {
+    "command": "openssl rand -base64 24",
+    "category": "security"
+  },
+  "listener": {
+    "command": "nc -lvnp 4444",
+    "category": "security"
+  },
+  "sshkeys": {
+    "command": "ls -la ~/.ssh/",
+    "category": "security"
   }
 }

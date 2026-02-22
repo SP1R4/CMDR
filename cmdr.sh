@@ -1,4 +1,5 @@
 #!/bin/bash
+# CMDR v2.0 - Command Manager
 
 # Get the directory where the script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
@@ -7,12 +8,18 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-# Define files
-COMMANDS_FILE="$SCRIPT_DIR/my_commands.json"
-LOG_FILE="$SCRIPT_DIR/commands_log.log"
-LOCK_FILE="$HOME/command_manager.lock"
+# Define files (user-level, no sudo needed)
+DATA_DIR="${CMDR_DATA_DIR:-$SCRIPT_DIR}"
+COMMANDS_FILE="$DATA_DIR/my_commands.json"
+LOG_FILE="$DATA_DIR/commands_log.log"
+LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/cmdr.lock"
+
+# Global verbosity level (default: INFO) - set BEFORE sourcing functions
+VERBOSITY="INFO"
 
 # Source functions
 FUNCTIONS_FILE="$SCRIPT_DIR/cmdr_functions.sh"
@@ -21,12 +28,6 @@ if [ ! -f "$FUNCTIONS_FILE" ]; then
     exit 1
 fi
 source "$FUNCTIONS_FILE"
-
-# Check if script is run with sudo
-if [ "$(id -u)" != "0" ]; then
-    echo -e "${RED}Error:${NC} This script must be run with sudo."
-    exit 1
-fi
 
 # Check for jq dependency
 if ! command -v jq >/dev/null; then
@@ -37,21 +38,17 @@ fi
 # Initialize files
 initialize_files
 
-# Global verbosity level (default: INFO)
-VERBOSITY="INFO"
-
 # Acquire the lock
 acquire_lock() {
-    # Check for stale lock file
     if [ -f "$LOCK_FILE" ]; then
-        local pid=$(cat "$LOCK_FILE" 2>/dev/null)
+        local pid
+        pid=$(cat "$LOCK_FILE" 2>/dev/null)
         if [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
             log_event "DEBUG" "Removing stale lock file (PID $pid)"
             rm -f "$LOCK_FILE"
         fi
     fi
 
-    # Use flock
     exec 200>"$LOCK_FILE"
     if ! flock -n 200; then
         log_event "ERROR" "Another instance is running ($LOCK_FILE)"
@@ -78,61 +75,128 @@ main() {
         exit 1
     fi
 
-    while getopts ":a:d:sr:x:l:i:mhv" opt; do
-        case ${opt} in
-            a )
-                shift $((OPTIND-1))
-                add_command "$1" "$2" "$3"
-                exit 0
+    # Pre-scan for -v flag so debug is active for all operations
+    for arg in "$@"; do
+        if [ "$arg" = "-v" ]; then
+            VERBOSITY="DEBUG"
+            log_event "DEBUG" "Verbosity set to DEBUG"
+            break
+        fi
+    done
+
+    # Manual argument parsing (replaces broken getopts for -a)
+    local action=""
+    local action_args=()
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -a)
+                action="add"
+                shift
+                # Collect tag, command, and optional category
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift  # tag
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift  # command
+                [ "$#" -ge 1 ] && [[ "$1" != -* ]] && action_args+=("$1") && shift  # category (optional)
                 ;;
-            d )
-                delete_command "$OPTARG"
-                exit 0
+            -e)
+                action="edit"
+                shift
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift  # tag
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift  # new command
+                [ "$#" -ge 1 ] && [[ "$1" != -* ]] && action_args+=("$1") && shift  # new category (optional)
                 ;;
-            s )
-                show_commands
-                exit 0
+            -d)
+                action="delete"
+                shift
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift
                 ;;
-            r )
-                run_command "$OPTARG"
+            -s)
+                action="show"
+                shift
                 ;;
-            x )
-                extract_commands "$OPTARG"
-                exit 0
+            -r)
+                action="run"
+                shift
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift
                 ;;
-            l )
-                extract_logs "$OPTARG"
-                exit 0
+            -f)
+                action="search"
+                shift
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift
                 ;;
-            i )
-                install_commands "$OPTARG"
-                exit 0
+            -x)
+                action="extract"
+                shift
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift
                 ;;
-            m )
-                interactive_mode
-                exit 0
+            -l)
+                action="logs"
+                shift
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift
                 ;;
-            h )
-                display_help
-                exit 0
+            -i)
+                action="install"
+                shift
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift
                 ;;
-            v )
-                VERBOSITY="DEBUG"
-                log_event "DEBUG" "Verbosity set to DEBUG"
+            -m)
+                action="interactive"
+                shift
                 ;;
-            \? )
-                log_event "ERROR" "Invalid option: -$OPTARG"
-                echo -e "${RED}Invalid option: -$OPTARG${NC}" 1>&2
-                exit 1
+            -h|--help)
+                action="help"
+                shift
                 ;;
-            : )
-                log_event "ERROR" "Option -$OPTARG requires an argument"
-                echo -e "${RED}Invalid option: -$OPTARG requires an argument${NC}" 1>&2
+            -v)
+                shift  # already handled above
+                ;;
+            *)
+                log_event "ERROR" "Invalid option: $1"
+                echo -e "${RED}Invalid option: $1${NC}" 1>&2
                 exit 1
                 ;;
         esac
     done
-    shift $((OPTIND -1))
+
+    case "$action" in
+        add)
+            add_command "${action_args[@]}"
+            ;;
+        edit)
+            edit_command "${action_args[@]}"
+            ;;
+        delete)
+            delete_command "${action_args[@]}"
+            ;;
+        show)
+            show_commands
+            ;;
+        run)
+            run_command "${action_args[@]}"
+            ;;
+        search)
+            search_commands "${action_args[@]}"
+            ;;
+        extract)
+            extract_commands "${action_args[@]}"
+            ;;
+        logs)
+            extract_logs "${action_args[@]}"
+            ;;
+        install)
+            install_commands "${action_args[@]}"
+            ;;
+        interactive)
+            interactive_mode
+            ;;
+        help)
+            display_help
+            ;;
+        *)
+            display_help
+            exit 1
+            ;;
+    esac
 }
 
 main "$@"
