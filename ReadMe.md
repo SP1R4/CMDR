@@ -1,129 +1,131 @@
-# CMDR - Command Manager
+# CMDR v2.0 - Command Manager
 
-CMDR is a Bash-based command management tool designed to store, organize, and execute shell commands securely. It allows users to tag commands, categorize them, and run them interactively or via command-line arguments. Built with security in mind, CMDR includes input sanitization to prevent command injection vulnerabilities and uses JSON for persistent storage.
+CMDR is a Bash-based command management tool for storing, organizing, and executing shell commands. Tag your commands, group them into categories, and run them from the CLI or an interactive menu. Uses JSON for storage and `jq` for processing.
+
+## What's New in v2
+
+- **No more sudo** — runs as your regular user
+- **Edit commands** (`-e`) — update existing commands in place
+- **Search** (`-f`) — find commands by keyword across tags, commands, and categories
+- **Safe JSON handling** — uses `jq --arg` instead of string interpolation (no injection risk)
+- **Fixed whitespace bug** — commands with spaces now work correctly
+- **Smart import** — `-i` merges into existing commands instead of overwriting
+- **Proper temp files** — uses `mktemp` instead of predictable paths
+- **Preloaded commands** — ships with useful sysadmin, network, dev, docker, and security commands
+- **CMDR ASCII banner** — new branding in help output
 
 ## Features
 
-- **Command Storage**: Save shell commands with unique tags in a JSON file (`my_commands.json`).
-- **Categorization**: Organize commands into custom categories (e.g., `dev`, `sysadmin`).
-- **Input Sanitization**: 
-  - Blocks dangerous characters (`;` and `|`) in commands to prevent injection.
-  - Restricts tags to alphanumeric characters, underscores, and hyphens.
-- **Interactive Mode**: Browse and execute commands via a menu-driven interface.
-- **Validation**: Ensures commands are executable, with an option to override for non-executable commands.
-- **Logging**: Supports `DEBUG`, `INFO`, and `ERROR` logging levels for troubleshooting.
-- **Locking**: Prevents concurrent runs using a lock file.
-- **Export/Import**: Extract commands to a JSON file or install from a JSON file.
-- **Modular Design**: Separates core logic (`cmdr.sh`) and functions (`cmdr_functions.sh`) for maintainability.
+- **Command Storage**: Save shell commands with unique tags in a JSON file
+- **Categorization**: Organize commands into custom categories (e.g., `dev`, `sysadmin`, `network`)
+- **Edit Commands**: Update existing commands without delete/re-add
+- **Search**: Find commands by keyword across tags, commands, and categories
+- **Interactive Mode**: Browse and execute commands via a menu-driven interface
+- **Validation**: Checks if executables exist before storing, with option to override
+- **Logging**: Supports `DEBUG`, `INFO`, and `ERROR` logging levels
+- **Locking**: Prevents concurrent runs using a lock file
+- **Export/Import**: Export commands to JSON or import/merge from a JSON file
+- **Modular Design**: Separates core logic (`cmdr.sh`) and functions (`cmdr_functions.sh`)
 
 ## Installation
 
-1. **Clone the Repository**:
+1. **Clone the repository**:
    ```bash
    git clone https://github.com/SP1R4/CMDR
    cd CMDR
    ```
 
-2. **Set Permissions**:
-   Ensure the scripts and JSON file are executable and writable:
+2. **Make scripts executable**:
    ```bash
    chmod +x cmdr.sh cmdr_functions.sh
-   chmod 666 my_commands.json commands_log.log
    ```
 
-3. **Install Dependencies**:
-   CMDR requires `jq` for JSON processing. Install it on Ubuntu/Debian:
+3. **Install `jq`** (if not already installed):
    ```bash
-   sudo apt-get update
    sudo apt-get install jq
    ```
 
-4. **Run with Sudo**:
-   Due to file permissions, run the script with `sudo`:
+4. **Run it**:
    ```bash
-   sudo ./cmdr.sh -h
+   ./cmdr.sh -h
    ```
 
 ## Usage
 
-Run `cmdr.sh` with the following options:
-
 ```bash
-sudo ./cmdr.sh [-a <tag> <command> [category]] [-d <tag>] [-s] [-r <tag>] [-x <output_file>] [-l <output_file>] [-i <input_file>] [-m] [-v] [-h]
+./cmdr.sh [options]
 ```
 
 ### Options
 
-- `-a <tag> <command> [category]`: Add a command with a tag and optional category (default: `default`).
-- `-d <tag>`: Delete the command with the specified tag.
-- `-s`: Show commands grouped by category.
-- `-r <tag>`: Run the command with the specified tag.
-- `-x <output_file>`: Extract commands to a JSON file.
-- `-l <output_file>`: Extract logs to a file.
-- `-i <input_file>`: Install commands from a JSON file.
-- `-m`: Enter interactive mode to browse and run commands.
-- `-v`: Enable debug logging (default: info).
-- `-h`: Display help message with ASCII art.
+| Flag | Description |
+|------|-------------|
+| `-a <tag> <command> [category]` | Add a command with tag and optional category (default: `default`) |
+| `-e <tag> [command] [category]` | Edit an existing command |
+| `-d <tag>` | Delete a command |
+| `-s` | Show all commands grouped by category |
+| `-r <tag>` | Run a command by tag |
+| `-f <keyword>` | Search commands by keyword |
+| `-x <output_file>` | Export commands to JSON file |
+| `-l <output_file>` | Export logs to file |
+| `-i <input_file>` | Import/merge commands from JSON file |
+| `-m` | Interactive mode |
+| `-v` | Enable debug logging |
+| `-h` | Show help |
 
 ### Examples
 
-1. **Add a command**:
-   ```bash
-   sudo ./cmdr.sh -a mycmd 'echo Hello' dev
-   ```
-   Output:
-   ```
-   Validation passed: 'echo' found.
-   Command added successfully: 'mycmd' in category 'dev'.
-   ```
+**Add a command:**
+```bash
+./cmdr.sh -a myserver 'python3 -m http.server 8080' dev
+```
 
-2. **Run a command**:
-   ```bash
-   sudo ./cmdr.sh -r mycmd
-   ```
-   Output:
-   ```
-   Running command: echo Hello
-   Hello
-   ```
+**Edit a command:**
+```bash
+./cmdr.sh -e myserver 'python3 -m http.server 9090'
+```
 
-3. **Show commands**:
-   ```bash
-   sudo ./cmdr.sh -s
-   ```
-   Output:
-   ```
-   Available commands by category:
-   Category: dev
-     mycmd: echo Hello
-   ```
+**Search for commands:**
+```bash
+./cmdr.sh -f docker
+```
 
-4. **Delete a command**:
-   ```bash
-   sudo ./cmdr.sh -d mycmd
-   ```
-   Output:
-   ```
-   Command 'mycmd' deleted successfully.
-   ```
+**Run a command:**
+```bash
+./cmdr.sh -r myserver
+```
 
-5. **Interactive mode**:
-   ```bash
-   sudo ./cmdr.sh -m
-   ```
-   Output:
-   ```
-   Interactive Mode (select 'exit' to quit):
-   Categories:
-   1) dev
-   2) exit
-   ```
+**Show all commands:**
+```bash
+./cmdr.sh -s
+```
 
-6. **Enable debug logging**:
-   ```bash
-   sudo ./cmdr.sh -v -a list_dir 'ls -l' sysadmin
-   ```
-   Check logs:
-   ```bash
-   cat commands_log.log
-   ```
+**Interactive mode:**
+```bash
+./cmdr.sh -m
+```
+
+**Export and import:**
+```bash
+./cmdr.sh -x backup.json
+./cmdr.sh -i backup.json
+```
+
+## Preloaded Commands
+
+CMDR ships with commands across these categories:
+
+| Category | Commands |
+|----------|----------|
+| `sysadmin` | `sysupdate`, `diskusage`, `meminfo`, `topproc` |
+| `network` | `ports`, `myip`, `pingg`, `flushdns` |
+| `dev` | `httpserver`, `gitlog`, `gitstatus` |
+| `docker` | `dps`, `dstop` |
+| `security` | `genpass`, `listener`, `sshkeys` |
+| `misc` | `weather` |
+
+Run `./cmdr.sh -s` to see them all.
+
+## License
+
+MIT
