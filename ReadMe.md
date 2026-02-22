@@ -29,26 +29,21 @@ CMDR is a Bash-based command management tool for storing, organizing, and execut
 
 ## Installation
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/SP1R4/CMDR
-   cd CMDR
-   ```
+```bash
+git clone https://github.com/SP1R4/CMDR
+cd CMDR
+./install.sh
+```
 
-2. **Make scripts executable**:
-   ```bash
-   chmod +x cmdr.sh cmdr_functions.sh
-   ```
+The installer will:
+- Install `jq` if missing (supports apt, dnf, yum, pacman, brew)
+- Set correct file permissions
+- Optionally add a `cmdr` alias to your shell
 
-3. **Install `jq`** (if not already installed):
-   ```bash
-   sudo apt-get install jq
-   ```
-
-4. **Run it**:
-   ```bash
-   ./cmdr.sh -h
-   ```
+After install, just run:
+```bash
+cmdr -h
+```
 
 ## Usage
 
