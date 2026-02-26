@@ -1,5 +1,5 @@
 #!/bin/bash
-# CMDR v2.0 - One-step installer
+# CMDR v2.1 - Installer
 
 set -e
 
@@ -18,7 +18,7 @@ echo -e "${GREEN}  ██║     ██╔████╔██║██║  █
 echo -e "${GREEN}  ██║     ██║╚██╔╝██║██║  ██║██╔══██╗${NC}"
 echo -e "${GREEN}  ╚██████╗██║ ╚═╝ ██║██████╔╝██║  ██║${NC}"
 echo -e "${GREEN}   ╚═════╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝${NC}"
-echo -e "  ${CYAN}Installer v2.0${NC}"
+echo -e "  ${CYAN}Installer v2.1${NC}"
 echo ""
 
 # Check and install jq
@@ -54,26 +54,62 @@ if [ ! -f "$SCRIPT_DIR/my_commands.json" ]; then
     echo -e "${GREEN}Created empty commands file.${NC}"
 fi
 
-# Offer to create a global alias
+# Detect shell config file
+SHELL_RC=""
+if [ -n "$ZSH_VERSION" ] || [ "$(basename "$SHELL")" = "zsh" ]; then
+    SHELL_RC="$HOME/.zshrc"
+else
+    SHELL_RC="$HOME/.bashrc"
+fi
+
+# Choose install method
 echo ""
-read -p "Add 'cmdr' alias to your shell? (Y/n): " add_alias
-add_alias="${add_alias:-Y}"
+echo -e "${YELLOW}Install method:${NC}"
+echo "  1) Shell alias (source from $SHELL_RC)"
+echo "  2) Symlink to ~/.local/bin/cmdr (XDG-compliant)"
+echo ""
+read -p "Choose method [1]: " method
+method="${method:-1}"
 
-if [ "$add_alias" = "y" ] || [ "$add_alias" = "Y" ]; then
-    ALIAS_LINE="alias cmdr='$SCRIPT_DIR/cmdr.sh'"
+ALIAS_LINE="alias cmdr='$SCRIPT_DIR/cmdr.sh'"
+SYMLINK_DIR="$HOME/.local/bin"
+SYMLINK_PATH="$SYMLINK_DIR/cmdr"
 
-    # Detect shell config file
-    SHELL_RC=""
-    if [ -n "$ZSH_VERSION" ] || [ "$(basename "$SHELL")" = "zsh" ]; then
-        SHELL_RC="$HOME/.zshrc"
-    else
-        SHELL_RC="$HOME/.bashrc"
+if [ "$method" = "2" ]; then
+    # XDG symlink method
+    mkdir -p "$SYMLINK_DIR"
+
+    # Check if ~/.local/bin is in PATH
+    if [[ ":$PATH:" != *":$SYMLINK_DIR:"* ]]; then
+        echo -e "${YELLOW}Warning:${NC} $SYMLINK_DIR is not in your PATH."
+        echo -e "Add this to $SHELL_RC:  ${CYAN}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+        echo ""
+        read -p "Add it now? (Y/n): " add_path
+        add_path="${add_path:-Y}"
+        if [ "$add_path" = "y" ] || [ "$add_path" = "Y" ]; then
+            echo "" >> "$SHELL_RC"
+            echo '# CMDR - PATH' >> "$SHELL_RC"
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
+            echo -e "${GREEN}Added PATH entry to $SHELL_RC${NC}"
+        fi
     fi
 
-    # Check if alias already exists
+    # Create/update symlink
+    ln -sf "$SCRIPT_DIR/cmdr.sh" "$SYMLINK_PATH"
+    echo -e "${GREEN}Symlink created: $SYMLINK_PATH -> $SCRIPT_DIR/cmdr.sh${NC}"
+
+    # Remove conflicting alias if present
     if grep -qF "alias cmdr=" "$SHELL_RC" 2>/dev/null; then
-        # Update existing alias
-        sed -i "s|alias cmdr=.*|$ALIAS_LINE|" "$SHELL_RC"
+        tmp_rc=$(mktemp)
+        grep -vF "alias cmdr=" "$SHELL_RC" > "$tmp_rc" && mv "$tmp_rc" "$SHELL_RC"
+        echo -e "${YELLOW}Removed old cmdr alias from $SHELL_RC${NC}"
+    fi
+else
+    # Alias method (default)
+    if grep -qF "alias cmdr=" "$SHELL_RC" 2>/dev/null; then
+        # Update existing alias using temp-file-and-mv (portable, no sed -i)
+        tmp_rc=$(mktemp)
+        sed "s|alias cmdr=.*|$ALIAS_LINE|" "$SHELL_RC" > "$tmp_rc" && mv "$tmp_rc" "$SHELL_RC"
         echo -e "${GREEN}Updated cmdr alias in $SHELL_RC${NC}"
     else
         echo "" >> "$SHELL_RC"
@@ -81,10 +117,27 @@ if [ "$add_alias" = "y" ] || [ "$add_alias" = "Y" ]; then
         echo "$ALIAS_LINE" >> "$SHELL_RC"
         echo -e "${GREEN}Added cmdr alias to $SHELL_RC${NC}"
     fi
-    echo -e "${YELLOW}Run 'source $SHELL_RC' or restart your terminal to use 'cmdr'${NC}"
+fi
+
+# Set up tab completion
+COMPLETION_FILE="$SCRIPT_DIR/cmdr_completion.bash"
+if [ -f "$COMPLETION_FILE" ]; then
+    source_line="source '$COMPLETION_FILE'"
+    export_line="export CMDR_DATA_DIR='$SCRIPT_DIR'"
+
+    if ! grep -qF "cmdr_completion" "$SHELL_RC" 2>/dev/null; then
+        echo "" >> "$SHELL_RC"
+        echo "# CMDR - Tab completion" >> "$SHELL_RC"
+        echo "$export_line" >> "$SHELL_RC"
+        echo "$source_line" >> "$SHELL_RC"
+        echo -e "${GREEN}Tab completion enabled in $SHELL_RC${NC}"
+    else
+        echo -e "${GREEN}Tab completion already configured.${NC}"
+    fi
 fi
 
 echo ""
 echo -e "${GREEN}Installation complete!${NC}"
+echo -e "${YELLOW}Run 'source $SHELL_RC' or restart your terminal.${NC}"
 echo -e "Run ${CYAN}cmdr -h${NC} (or ${CYAN}$SCRIPT_DIR/cmdr.sh -h${NC}) to get started."
 echo ""
