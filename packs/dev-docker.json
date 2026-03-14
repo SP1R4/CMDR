@@ -1,0 +1,42 @@
+{
+  "dk-build": {
+    "command": "docker build -t {IMAGE} .",
+    "category": "dev-docker",
+    "description": "Build Docker image from current directory"
+  },
+  "dk-run": {
+    "command": "docker run -it --rm -p {PORT}:{PORT} {IMAGE}",
+    "category": "dev-docker",
+    "description": "Run container interactively with port mapping"
+  },
+  "dk-ps": {
+    "command": "docker ps -a --format 'table {{.ID}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'",
+    "category": "dev-docker",
+    "description": "List all containers with formatted output"
+  },
+  "dk-clean": {
+    "command": "docker system prune -af && docker volume prune -f",
+    "category": "dev-docker",
+    "description": "Clean up all unused Docker resources"
+  },
+  "dk-logs": {
+    "command": "docker logs -f {CONTAINER}",
+    "category": "dev-docker",
+    "description": "Follow container logs"
+  },
+  "dk-exec": {
+    "command": "docker exec -it {CONTAINER} /bin/bash",
+    "category": "dev-docker",
+    "description": "Shell into a running container"
+  },
+  "dk-compose-up": {
+    "command": "docker compose up -d --build",
+    "category": "dev-docker",
+    "description": "Build and start compose stack in background"
+  },
+  "dk-compose-down": {
+    "command": "docker compose down -v",
+    "category": "dev-docker",
+    "description": "Stop and remove compose stack with volumes"
+  }
+}

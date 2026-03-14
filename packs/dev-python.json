@@ -1,0 +1,37 @@
+{
+  "py-venv": {
+    "command": "python3 -m venv venv && source venv/bin/activate",
+    "category": "dev-python",
+    "description": "Create and activate virtual environment"
+  },
+  "py-freeze": {
+    "command": "pip freeze > requirements.txt",
+    "category": "dev-python",
+    "description": "Freeze pip dependencies to requirements.txt"
+  },
+  "py-install-req": {
+    "command": "pip install -r requirements.txt",
+    "category": "dev-python",
+    "description": "Install from requirements.txt"
+  },
+  "py-test": {
+    "command": "python3 -m pytest -v",
+    "category": "dev-python",
+    "description": "Run pytest with verbose output"
+  },
+  "py-lint": {
+    "command": "python3 -m flake8 . && python3 -m mypy .",
+    "category": "dev-python",
+    "description": "Run flake8 and mypy linters"
+  },
+  "py-serve": {
+    "command": "python3 -m http.server {PORT}",
+    "category": "dev-python",
+    "description": "Quick HTTP file server"
+  },
+  "py-profile": {
+    "command": "python3 -m cProfile -s cumtime {SCRIPT}",
+    "category": "dev-python",
+    "description": "Profile a Python script by cumulative time"
+  }
+}
