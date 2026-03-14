@@ -1,0 +1,33 @@
+{
+  "git-log-pretty": {
+    "command": "git log --oneline --graph --decorate --all -20",
+    "category": "dev-git",
+    "description": "Pretty git log with graph (last 20)",
+    "aliases": ["glog"]
+  },
+  "git-undo": {
+    "command": "git reset --soft HEAD~1",
+    "category": "dev-git",
+    "description": "Undo last commit keeping changes staged"
+  },
+  "git-amend": {
+    "command": "git commit --amend --no-edit",
+    "category": "dev-git",
+    "description": "Amend last commit with currently staged changes"
+  },
+  "git-stash-show": {
+    "command": "git stash list && echo '---' && git stash show -p stash@{0} 2>/dev/null",
+    "category": "dev-git",
+    "description": "List stashes and show latest diff"
+  },
+  "git-branch-clean": {
+    "command": "git branch --merged main | grep -v main | xargs -r git branch -d",
+    "category": "dev-git",
+    "description": "Delete branches already merged into main"
+  },
+  "git-diff-stat": {
+    "command": "git diff --stat HEAD~{N}",
+    "category": "dev-git",
+    "description": "Show diff stats for last N commits"
+  }
+}

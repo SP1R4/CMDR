@@ -1,0 +1,48 @@
+{
+  "dirfuzz": {
+    "command": "ffuf -u http://{TARGET}:{PORT}/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,301,302,403",
+    "category": "ctf-web",
+    "description": "Directory/file fuzzing with ffuf",
+    "aliases": ["fuzz"]
+  },
+  "subdomain-fuzz": {
+    "command": "ffuf -u http://{TARGET} -H 'Host: FUZZ.{TARGET}' -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -mc 200",
+    "category": "ctf-web",
+    "description": "Virtual host / subdomain fuzzing",
+    "aliases": ["vhost"]
+  },
+  "sqli-scan": {
+    "command": "sqlmap -u '{URL}' --batch --level 3 --risk 2",
+    "category": "ctf-web",
+    "description": "Automated SQL injection scan",
+    "aliases": ["sqli"]
+  },
+  "nikto-scan": {
+    "command": "nikto -h http://{TARGET}:{PORT}",
+    "category": "ctf-web",
+    "description": "Web server vulnerability scanner",
+    "aliases": ["nikto"]
+  },
+  "whatweb-scan": {
+    "command": "whatweb http://{TARGET}:{PORT} -v",
+    "category": "ctf-web",
+    "description": "Web technology fingerprinting",
+    "aliases": ["whatweb"]
+  },
+  "curl-headers": {
+    "command": "curl -I -s http://{TARGET}:{PORT}",
+    "category": "ctf-web",
+    "description": "Grab HTTP response headers"
+  },
+  "gobuster-dir": {
+    "command": "gobuster dir -u http://{TARGET}:{PORT} -w /usr/share/wordlists/dirb/common.txt -t 50",
+    "category": "ctf-web",
+    "description": "Directory brute-force with gobuster",
+    "aliases": ["gob"]
+  },
+  "wfuzz-param": {
+    "command": "wfuzz -c -z file,/usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt --hc 404 'http://{TARGET}:{PORT}/{PATH}?FUZZ=test'",
+    "category": "ctf-web",
+    "description": "Parameter discovery with wfuzz"
+  }
+}

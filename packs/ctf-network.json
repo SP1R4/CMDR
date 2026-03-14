@@ -1,0 +1,51 @@
+{
+  "quick-scan": {
+    "command": "nmap -sV -sC -oN scan_{TARGET}.txt {TARGET}",
+    "category": "ctf-recon",
+    "description": "Quick nmap service and script scan",
+    "aliases": ["qs"]
+  },
+  "full-scan": {
+    "command": "nmap -p- -sV -sC -A -oN fullscan_{TARGET}.txt {TARGET}",
+    "category": "ctf-recon",
+    "description": "Full port nmap scan with OS detection",
+    "aliases": ["fs"]
+  },
+  "udp-scan": {
+    "command": "nmap -sU --top-ports 50 -oN udpscan_{TARGET}.txt {TARGET}",
+    "category": "ctf-recon",
+    "description": "UDP top 50 port scan"
+  },
+  "vuln-scan": {
+    "command": "nmap --script vuln -oN vulnscan_{TARGET}.txt {TARGET}",
+    "category": "ctf-recon",
+    "description": "Nmap vulnerability script scan"
+  },
+  "smb-enum": {
+    "command": "enum4linux -a {TARGET}",
+    "category": "ctf-enum",
+    "description": "SMB/NetBIOS enumeration"
+  },
+  "snmp-walk": {
+    "command": "snmpwalk -v2c -c public {TARGET}",
+    "category": "ctf-enum",
+    "description": "SNMP enumeration with community string"
+  },
+  "dns-enum": {
+    "command": "dnsrecon -d {DOMAIN} -t std",
+    "category": "ctf-enum",
+    "description": "DNS enumeration and zone transfer attempt"
+  },
+  "rev-shell-listener": {
+    "command": "nc -nlvp {LPORT}",
+    "category": "ctf-exploit",
+    "description": "Netcat reverse shell listener",
+    "aliases": ["listener", "nc-listen"]
+  },
+  "http-upload-server": {
+    "command": "python3 -c 'import http.server,socketserver;h=http.server.SimpleHTTPRequestHandler;h.do_PUT=lambda s:open(s.path[1:],\"wb\").write(s.rfile.read(int(s.headers[\"Content-Length\"]))) or s.send_response(201) or s.end_headers();socketserver.TCPServer((\"\",{LPORT}),h).serve_forever()'",
+    "category": "ctf-exploit",
+    "description": "Python HTTP server that accepts file uploads",
+    "aliases": ["upload-server"]
+  }
+}

@@ -1,2 +1,10 @@
 commands_log.log
 .my_commands.json.bak
+.my_commands.json.bak.src
+.cmdr_env.json
+.cmdr_notes.json
+.cmdr_playbooks.json
+.cmdr_active_workspace
+my_commands.json
+outputs/
+workspaces/
