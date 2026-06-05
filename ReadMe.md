@@ -2,6 +2,8 @@
 
 # CMDR v3.0
 
+![License](https://img.shields.io/github/license/SP1R4/CMDR?color=black) ![Top language](https://img.shields.io/github/languages/top/SP1R4/CMDR) ![Last commit](https://img.shields.io/github/last-commit/SP1R4/CMDR)
+
 **A command manager built for CTF players and developers**
 
 Store, organize, and run shell commands with workspaces, environment variables,
