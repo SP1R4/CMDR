@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, harden-fixes ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: Lint shell scripts
+        run: shellcheck -x -S warning cmdr.sh cmdr_functions.sh install.sh tests/run.sh
+
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+      - name: Run tests
+        run: bash tests/run.sh

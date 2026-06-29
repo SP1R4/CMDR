@@ -103,6 +103,7 @@ if [ ! -f "$FUNCTIONS_FILE" ]; then
     echo -e "${RED}Error:${NC} Functions file '$FUNCTIONS_FILE' not found."
     exit 1
 fi
+# shellcheck source=cmdr_functions.sh
 source "$FUNCTIONS_FILE"
 
 if ! command -v jq >/dev/null; then

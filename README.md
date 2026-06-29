@@ -2,7 +2,7 @@
 
 # CMDR v3.1
 
-![License](https://img.shields.io/github/license/SP1R4/CMDR?color=black) ![Top language](https://img.shields.io/github/languages/top/SP1R4/CMDR) ![Last commit](https://img.shields.io/github/last-commit/SP1R4/CMDR)
+[![CI](https://github.com/SP1R4/CMDR/actions/workflows/ci.yml/badge.svg)](https://github.com/SP1R4/CMDR/actions/workflows/ci.yml) ![License](https://img.shields.io/github/license/SP1R4/CMDR?color=black) ![Top language](https://img.shields.io/github/languages/top/SP1R4/CMDR) ![Last commit](https://img.shields.io/github/last-commit/SP1R4/CMDR)
 
 **A command manager built for CTF players and developers**
 
@@ -215,6 +215,7 @@ cmdr --pack load ctf-web      # Load a pack
 
 | Pack | Commands | Category |
 |------|----------|----------|
+| `starter` | handy sysadmin/network/dev/security one-liners | mixed |
 | `ctf-network` | nmap scans, enum4linux, netcat, DNS | ctf-recon, ctf-enum, ctf-exploit |
 | `ctf-web` | ffuf, gobuster, sqlmap, nikto, wfuzz | ctf-web |
 | `ctf-privesc` | SUID, capabilities, cron, sudo, linpeas | ctf-privesc |
@@ -435,6 +436,18 @@ cmdr             # bare invocation on a TTY also opens the picker (falls back to
 | `-V` | `cmdr -V` | Show version |
 | `-h` | `cmdr -h` | Show help |
 
+## Development & Testing
+
+CMDR is plain Bash + `jq`, no build step. Lint and test before sending changes:
+
+```bash
+shellcheck -x -S warning cmdr.sh cmdr_functions.sh install.sh tests/run.sh
+bash tests/run.sh
+```
+
+CI runs both on every push. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
+and [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## License
 
-MIT
+[MIT](LICENSE) © SP1R4
