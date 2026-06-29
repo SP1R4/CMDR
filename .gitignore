@@ -4,7 +4,12 @@ commands_log.log
 .cmdr_env.json
 .cmdr_notes.json
 .cmdr_playbooks.json
+.cmdr_hosts.json
+.cmdr_findings.json
+.cmdr_history.json
 .cmdr_active_workspace
+.cmdr_trusted.json
 my_commands.json
 outputs/
 workspaces/
+.cmdr.tmp.*
