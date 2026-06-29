@@ -9,7 +9,7 @@
 # See `cmdr -h` for full usage or `cmdr <flag> --help` for per-command help.
 # ============================================================================
 
-CMDR_VERSION="3.1.0"
+CMDR_VERSION="3.2.0"
 
 # Resolve the script's install directory (follows symlinks)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
@@ -61,6 +61,8 @@ PLAYBOOKS_FILE="$ACTIVE_DATA_DIR/.cmdr_playbooks.json"
 HOSTS_FILE="$ACTIVE_DATA_DIR/.cmdr_hosts.json"
 FINDINGS_FILE="$ACTIVE_DATA_DIR/.cmdr_findings.json"
 HISTORY_FILE="$ACTIVE_DATA_DIR/.cmdr_history.json"
+WORKFLOWS_FILE="$ACTIVE_DATA_DIR/.cmdr_workflows.json"
+SECRETS_FILE="$ACTIVE_DATA_DIR/.cmdr_secrets.json"
 HISTORY_MAX=200
 OUTPUTS_DIR="$ACTIVE_DATA_DIR/outputs"
 LOCAL_COMMANDS_FILE="$(pwd)/.cmdr.json"
@@ -91,6 +93,7 @@ CMDR_HOST_OS=""        # --os                  (host add)
 CMDR_HOST_USER=""      # --user                (host add)
 CMDR_HOST_PORT=""      # --port                (host add)
 CMDR_HOST_HOSTNAME=""  # --hostname            (host add)
+CMDR_REPORT_FORMAT=""  # --format              (report: md|csv|html|pdf)
 
 # Write target: defaults to workspace commands, overridden by --local
 WRITE_COMMANDS_FILE="$COMMANDS_FILE"
@@ -419,12 +422,60 @@ main() {
             --report)
                 action="report"; shift
                 [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift  # optional output file
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --format) shift; [ "$#" -ge 1 ] && CMDR_REPORT_FORMAT="$1" && shift ;;
+                        -v|-n|--dry-run|--local|--save) shift ;;
+                        *) break ;;
+                    esac
+                done
                 ;;
 
             # --- History ---
             --history)
                 action="show_history"; shift
                 [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift  # optional count
+                ;;
+
+            # --- Workflows ---
+            --flow)
+                shift
+                [ "${1:-}" = "--help" ] && { display_subcommand_help "flow"; exit 0; }
+                case "${1:-}" in
+                    run)    action="flow_run"; shift; [ "$#" -ge 1 ] && action_args+=("$1") && shift ;;
+                    list|ls) action="flow_list"; shift ;;
+                    import) action="flow_import"; shift; [ "$#" -ge 1 ] && action_args+=("$1") && shift ;;
+                    show)   action="flow_show"; shift; [ "$#" -ge 1 ] && action_args+=("$1") && shift ;;
+                    *) echo -e "${RED}Error:${NC} Unknown flow subcommand '${1:-}'. Use run/list/import/show." >&2; exit 1 ;;
+                esac
+                ;;
+
+            # --- Secrets ---
+            --secret)
+                action="set_secret"; shift
+                [ "${1:-}" = "--help" ] && { display_subcommand_help "secret"; exit 0; }
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift  # name
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift  # spec
+                ;;
+            --secrets)
+                action="list_secrets"; shift
+                ;;
+            --secret-clear)
+                action="clear_secret"; shift
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift
+                ;;
+
+            # --- Lint / Sync ---
+            --lint)
+                action="lint"; shift
+                ;;
+            --sync)
+                action="sync"; shift
+                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift  # optional message
+                ;;
+            --sync-remote)
+                action="sync_remote"; shift
+                [ "$#" -ge 1 ] && action_args+=("$1") && shift
                 ;;
 
             # --- Packs ---
@@ -492,7 +543,7 @@ main() {
 
     # ----- Lock only mutating actions, for the duration of the write -----
     case "$action" in
-        add|edit|delete|set_env|clear_env|create_playbook|add_note|install|load_pack|undo|switch_workspace|trust_local|untrust_local|host_add|host_rm|add_finding|lock_workspace|unlock_workspace)
+        add|edit|delete|set_env|clear_env|create_playbook|add_note|install|load_pack|undo|switch_workspace|trust_local|untrust_local|host_add|host_rm|add_finding|lock_workspace|unlock_workspace|flow_import|set_secret|clear_secret)
             acquire_lock ;;
     esac
 
@@ -540,6 +591,22 @@ main() {
 
         # History
         show_history)     show_history "${action_args[0]:-20}" ;;
+
+        # Workflows
+        flow_run)         flow_run "${action_args[0]:-}" ;;
+        flow_list)        flow_list ;;
+        flow_import)      flow_import "${action_args[0]:-}" ;;
+        flow_show)        flow_show "${action_args[0]:-}" ;;
+
+        # Secrets
+        set_secret)       set_secret "${action_args[0]:-}" "${action_args[1]:-}" ;;
+        list_secrets)     list_secrets ;;
+        clear_secret)     clear_secret "${action_args[0]:-}" ;;
+
+        # Lint & sync
+        lint)             lint_all ;;
+        sync)             sync_data "${action_args[0]:-}" ;;
+        sync_remote)      sync_set_remote "${action_args[0]:-}" ;;
 
         # Picker & encrypted workspaces
         pick)             pick_command ;;

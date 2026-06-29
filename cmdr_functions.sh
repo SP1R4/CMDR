@@ -359,6 +359,15 @@ resolve_command() {
     # Step 1: substitute plain {KEY} env vars up front (back-compat / fast path).
     cmd=$(resolve_env_vars "$cmd")
 
+    # Step 1b: protect secret-backed placeholders so they survive this pass
+    # untouched. They are filled later by resolve_secrets() at exec time, which
+    # keeps the secret out of the displayed/recorded command. RS (0x1e) marker.
+    local _sname
+    while IFS= read -r _sname; do
+        [ -z "$_sname" ] && continue
+        cmd="${cmd//\{$_sname\}/$'\x1e'$_sname$'\x1e'}"
+    done < <(_secret_names)
+
     # Step 2: unified left-to-right pass over remaining placeholders.
     local i=0
     while :; do
@@ -403,7 +412,116 @@ resolve_command() {
         cmd="${cmd//"$token"/$value}"
     done
 
+    # Restore protected secret placeholders back to {NAME} for display/exec.
+    # Build the replacement in a var: backslashes in a ${//} replacement are
+    # inserted literally, and a bare } would close the expansion early.
+    local _restore
+    while IFS= read -r _sname; do
+        [ -z "$_sname" ] && continue
+        _restore="{$_sname}"
+        cmd="${cmd//$'\x1e'$_sname$'\x1e'/$_restore}"
+    done < <(_secret_names)
+
     echo "$cmd"
+}
+
+# ----------------------------------------------------------------------------
+# Section 3b: Secrets
+# Per-workspace map of NAME -> {provider, ref}. Referenced as {NAME} in
+# commands and fetched lazily at execution time, so the secret never lands in
+# the stored command, the run history, or the on-screen "Running" line.
+# Providers: pass | cmd | env | age | file.
+# ----------------------------------------------------------------------------
+
+# Print configured secret names, one per line.
+_secret_names() {
+    [ -f "$SECRETS_FILE" ] || return 0
+    jq -r 'keys[]' "$SECRETS_FILE" 2>/dev/null
+}
+
+# Resolve a single secret NAME to its value (first line, trimmed). Empty on miss.
+resolve_secret() {
+    local name="$1"
+    [ -f "$SECRETS_FILE" ] || return 0
+    local provider ref
+    provider=$(jq -r --arg n "$name" '.[$n].provider // empty' "$SECRETS_FILE" 2>/dev/null)
+    ref=$(jq -r --arg n "$name" '.[$n].ref // empty' "$SECRETS_FILE" 2>/dev/null)
+    [ -z "$provider" ] && return 0
+
+    local val=""
+    case "$provider" in
+        pass) command -v pass >/dev/null 2>&1 && val=$(pass show "$ref" 2>/dev/null | head -1) ;;
+        cmd)  val=$(bash -c "$ref" 2>/dev/null | head -1) ;;
+        env)  val="${!ref:-}" ;;
+        age)  command -v age >/dev/null 2>&1 && val=$(age -d "$ref" 2>/dev/null | head -1) ;;
+        file) [ -f "$ref" ] && val=$(head -1 "$ref") ;;
+        *)    val="" ;;
+    esac
+    printf '%s' "$val"
+}
+
+# Replace every {NAME} that maps to a secret with its live value. Used only at
+# the moment of execution; the input (display) command keeps the {NAME} token.
+resolve_secrets() {
+    local cmd="$1" name val
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        case "$cmd" in
+            *"{$name}"*) val=$(resolve_secret "$name"); cmd="${cmd//\{$name\}/$val}" ;;
+        esac
+    done < <(_secret_names)
+    printf '%s' "$cmd"
+}
+
+# Register a secret: cmdr --secret NAME provider:ref
+set_secret() {
+    local name="$1" spec="$2"
+    if [ -z "$name" ] || [ -z "$spec" ] || [ "$spec" = "$name" ] || [[ "$spec" != *:* ]]; then
+        echo -e "${RED}Error:${NC} Usage: cmdr --secret NAME provider:ref"
+        echo -e "Providers: ${CYAN}pass${NC}:path  ${CYAN}cmd${NC}:'shell'  ${CYAN}env${NC}:VAR  ${CYAN}age${NC}:file  ${CYAN}file${NC}:path"
+        exit 1
+    fi
+    name=$(sanitize_tag "$name") || exit 1
+    local provider="${spec%%:*}" ref="${spec#*:}"
+    case "$provider" in
+        pass|cmd|env|age|file) ;;
+        *) echo -e "${RED}Error:${NC} Unknown provider '$provider'. Use pass/cmd/env/age/file."; exit 1 ;;
+    esac
+
+    [ ! -f "$SECRETS_FILE" ] && echo "{}" > "$SECRETS_FILE"
+    local tmp_file
+    tmp_file=$(_mktemp_beside "$SECRETS_FILE")
+    jq --arg n "$name" --arg p "$provider" --arg r "$ref" \
+        '. + {($n): {provider:$p, ref:$r}}' "$SECRETS_FILE" > "$tmp_file" && mv "$tmp_file" "$SECRETS_FILE"
+    log_event "INFO" "Secret set: $name ($provider)"
+    echo -e "${GREEN}Secret set:${NC} {$name} -> ${provider}:${ref}"
+}
+
+# List configured secrets (provider/ref shown; values never fetched here).
+list_secrets() {
+    if [ ! -f "$SECRETS_FILE" ] || [ "$(jq 'length' "$SECRETS_FILE" 2>/dev/null || echo 0)" -eq 0 ]; then
+        echo -e "${YELLOW}No secrets configured.${NC}"
+        return 0
+    fi
+    echo -e "${BOLD}${YELLOW}Secrets${NC} (use as {NAME} in commands):"
+    echo ""
+    jq -r 'to_entries[] | "  {\(.key)}\t\(.value.provider):\(.value.ref)"' "$SECRETS_FILE" \
+        | while IFS=$'\t' read -r nm src; do
+            printf "  ${CYAN}%-22s${NC} %s\n" "$nm" "$src"
+        done
+}
+
+# Remove a secret mapping.
+clear_secret() {
+    local name="$1"
+    if [ ! -f "$SECRETS_FILE" ] || ! jq -e --arg n "$name" 'has($n)' "$SECRETS_FILE" >/dev/null 2>&1; then
+        echo -e "${YELLOW}Secret '$name' not found.${NC}"; return 0
+    fi
+    local tmp_file
+    tmp_file=$(_mktemp_beside "$SECRETS_FILE")
+    jq --arg n "$name" 'del(.[$n])' "$SECRETS_FILE" > "$tmp_file" && mv "$tmp_file" "$SECRETS_FILE"
+    log_event "INFO" "Secret cleared: $name"
+    echo -e "${GREEN}Secret cleared:${NC} $name"
 }
 
 # Ensure no alias collides with an existing tag or another entry's alias.
@@ -1013,17 +1131,24 @@ _run_one() {
         fi
     fi
 
+    # Fill secret-backed {NAME} tokens only now, at exec time. `$cmd` keeps the
+    # tokens so secrets never reach the screen, history, or logs.
+    local exec_cmd
+    exec_cmd=$(resolve_secrets "$cmd")
+
     # Wrap for remote execution when --on targets a host.
-    local exec_cmd="$cmd"
     if [ -n "$CMDR_ON" ] && [ -n "$host" ]; then
-        if ! exec_cmd=$(build_ssh_cmd "$host" "$cmd"); then
+        if ! exec_cmd=$(build_ssh_cmd "$host" "$exec_cmd"); then
             return 1
         fi
     fi
 
     if [ "$DRY_RUN" = true ]; then
-        echo -e "${YELLOW}[DRY RUN]${NC} (${label}) Would execute: $exec_cmd"
-        log_event "INFO" "Dry run for '$label': $exec_cmd"
+        # Show the display command (tokens, not secret values).
+        local show="$cmd"
+        [ -n "$CMDR_ON" ] && [ -n "$host" ] && show=$(build_ssh_cmd "$host" "$cmd")
+        echo -e "${YELLOW}[DRY RUN]${NC} (${label}) Would execute: $show"
+        log_event "INFO" "Dry run for '$label': $show"
         return 0
     fi
 
@@ -1148,6 +1273,8 @@ clipboard_copy() {
     fi
 
     cmd=$(resolve_command "$cmd" "${run_args[@]}")
+    # Clipboard contents are meant to be pasted and run, so fill secrets here.
+    cmd=$(resolve_secrets "$cmd")
 
     # Try available clipboard tools in order of preference
     if command -v xclip >/dev/null 2>&1; then
@@ -1486,13 +1613,54 @@ generate_report() {
         fi
     }
 
-    if [ -n "$out" ]; then
-        _report_body > "$out"
-        log_event "INFO" "Report written to $out"
-        echo -e "${GREEN}Report written to:${NC} $out"
-    else
-        _report_body
+    # CSV export of findings (machine-readable).
+    _report_csv() {
+        echo "severity,host,title,evidence,timestamp"
+        [ -f "$FINDINGS_FILE" ] || return 0
+        jq -r '
+            def rank: {"critical":0,"high":1,"medium":2,"low":3,"info":4}[.severity] // 5;
+            sort_by(rank) | .[]
+            | [.severity, (.host // ""), .title, (.evidence // ""), .timestamp] | @csv' "$FINDINGS_FILE"
+    }
+
+    # Decide format: explicit --format wins, else infer from the file extension.
+    local fmt="$CMDR_REPORT_FORMAT"
+    if [ -z "$fmt" ] && [ -n "$out" ]; then
+        case "$out" in
+            *.csv)  fmt="csv" ;;
+            *.html|*.htm) fmt="html" ;;
+            *.pdf)  fmt="pdf" ;;
+            *)      fmt="md" ;;
+        esac
     fi
+    [ -z "$fmt" ] && fmt="md"
+
+    case "$fmt" in
+        csv)
+            if [ -n "$out" ]; then _report_csv > "$out"; echo -e "${GREEN}CSV findings written to:${NC} $out"
+            else _report_csv; fi
+            ;;
+        html|pdf)
+            if ! command -v pandoc >/dev/null 2>&1; then
+                echo -e "${RED}Error:${NC} '$fmt' output needs pandoc (https://pandoc.org)."; exit 1
+            fi
+            [ -z "$out" ] && { echo -e "${RED}Error:${NC} $fmt output requires a file path."; exit 1; }
+            if _report_body | pandoc -f markdown -t "$fmt" -s -o "$out" 2>/dev/null; then
+                echo -e "${GREEN}Report (${fmt}) written to:${NC} $out"
+            else
+                echo -e "${RED}Error:${NC} pandoc failed to render $fmt (PDF needs a LaTeX engine)."; exit 1
+            fi
+            ;;
+        *)
+            if [ -n "$out" ]; then
+                _report_body > "$out"
+                log_event "INFO" "Report written to $out"
+                echo -e "${GREEN}Report written to:${NC} $out"
+            else
+                _report_body
+            fi
+            ;;
+    esac
 }
 
 # ----------------------------------------------------------------------------
@@ -2036,6 +2204,410 @@ interactive_mode() {
 }
 
 # ----------------------------------------------------------------------------
+# Section 12b: Workflow Engine
+# JSON workflows of conditional, capturing, retrying, optionally-parallel steps.
+# A workflow is { "name": "...", "steps": [ <step>, ... ] }. Each step:
+#   { "run": "tag", "args": ["@host","x"], "when": "<cond>",
+#     "capture": {"VAR":"regex"}, "register": "id", "retry": N,
+#     "timeout": SECS, "remote": true, "continue_on_error": true }
+# or a parallel block: { "parallel": [ <step>, <step> ] }.
+# Conditions (safe DSL, no shell eval): lhs OP rhs / lhs exists, joined by
+# && or ||, optional leading !. lhs ∈ env:NAME | step:ID.exit | step:ID.stdout
+# | NAME(=env). OP ∈ == != contains matches.
+# ----------------------------------------------------------------------------
+
+# Resolve a workflow reference (file path or stored name) to its JSON.
+_flow_load() {
+    local ref="$1"
+    if [ -f "$ref" ]; then cat "$ref"; return 0; fi
+    if [ -f "$WORKFLOWS_FILE" ] && jq -e --arg n "$ref" 'has($n)' "$WORKFLOWS_FILE" >/dev/null 2>&1; then
+        jq -c --arg n "$ref" '.[$n]' "$WORKFLOWS_FILE"; return 0
+    fi
+    echo -e "${RED}Error:${NC} Workflow '$ref' not found (no such file or stored name)." >&2
+    return 1
+}
+
+# Record one step's result in the run-state file.
+_flow_state_set() {
+    local state="$1" id="$2" ex="$3" so="$4" tmp
+    tmp=$(_mktemp_beside "$state")
+    jq --arg id "$id" --arg ex "$ex" --arg so "$so" \
+        '.steps[$id] = {exit:($ex|tonumber), stdout:$so}' "$state" > "$tmp" && mv "$tmp" "$state"
+}
+
+# Resolve a condition left-hand side to a value.
+_flow_lhs() {
+    local l="$1" state="$2"
+    l="$(echo "$l" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    case "$l" in
+        env:*)         jq -r --arg k "${l#env:}" '.[$k] // empty' "$ENV_FILE" 2>/dev/null ;;
+        step:*.exit)   local i="${l#step:}"; i="${i%.exit}";   jq -r --arg i "$i" '.steps[$i].exit   // empty' "$state" 2>/dev/null ;;
+        step:*.stdout) local i="${l#step:}"; i="${i%.stdout}"; jq -r --arg i "$i" '.steps[$i].stdout // empty' "$state" 2>/dev/null ;;
+        *)             jq -r --arg k "$l" '.[$k] // empty' "$ENV_FILE" 2>/dev/null ;;
+    esac
+}
+
+# Evaluate a single clause; return 0 if true.
+_flow_clause() {
+    local c="$1" state="$2" neg=0 res=1
+    c="$(echo "$c" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ "${c:0:1}" = "!" ]; then neg=1; c="$(echo "${c:1}" | sed 's/^[[:space:]]*//')"; fi
+    local lhs op rhs lv
+    if [[ "$c" =~ ^(.+)[[:space:]]+(==|!=|contains|matches)[[:space:]]+(.+)$ ]]; then
+        lhs="${BASH_REMATCH[1]}"; op="${BASH_REMATCH[2]}"; rhs="${BASH_REMATCH[3]}"
+        rhs="${rhs%\"}"; rhs="${rhs#\"}"; rhs="${rhs%\'}"; rhs="${rhs#\'}"
+        lv=$(_flow_lhs "$lhs" "$state")
+        case "$op" in
+            ==)       [ "$lv" = "$rhs" ] && res=0 ;;
+            !=)       [ "$lv" != "$rhs" ] && res=0 ;;
+            contains) case "$lv" in *"$rhs"*) res=0 ;; esac ;;
+            matches)  printf '%s' "$lv" | grep -qE -e "$rhs" && res=0 ;;
+        esac
+    elif [[ "$c" =~ ^(.+)[[:space:]]+exists$ ]]; then
+        lv=$(_flow_lhs "${BASH_REMATCH[1]}" "$state"); [ -n "$lv" ] && res=0
+    fi
+    if [ "$neg" -eq 1 ]; then [ "$res" -eq 0 ] && res=1 || res=0; fi
+    return $res
+}
+
+# Evaluate a when-expression (clauses joined by && or ||).
+_flow_eval_when() {
+    local expr="$1" state="$2" mode="and" sep=" && " rest clause
+    if [[ "$expr" == *"||"* ]]; then mode="or"; sep=" || "; fi
+    rest="$expr"
+    while [ -n "$rest" ]; do
+        if [[ "$rest" == *"$sep"* ]]; then clause="${rest%%"$sep"*}"; rest="${rest#*"$sep"}"; else clause="$rest"; rest=""; fi
+        if _flow_clause "$clause" "$state"; then
+            [ "$mode" = "or" ] && return 0
+        else
+            [ "$mode" = "and" ] && return 1
+        fi
+    done
+    [ "$mode" = "and" ] && return 0 || return 1
+}
+
+# Apply a step's captures (VAR -> regex|whole) from output into the env file.
+_flow_apply_captures() {
+    local step="$1" out="$2" var rgx val tmp
+    while IFS=$'\t' read -r var rgx; do
+        [ -z "$var" ] && continue
+        if [ -n "$rgx" ]; then
+            val=$(printf '%s\n' "$out" | grep -oE -e "$rgx" | head -1)
+        else
+            val=$(printf '%s' "$out" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        fi
+        [ ! -f "$ENV_FILE" ] && echo "{}" > "$ENV_FILE"
+        tmp=$(_mktemp_beside "$ENV_FILE")
+        jq --arg k "$var" --arg v "$val" '. + {($k): $v}' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
+        echo -e "  ${GREEN}captured${NC} {$var} = $val"
+    done < <(printf '%s' "$step" | jq -r '.capture // {} | to_entries[] | "\(.key)\t\(.value)"')
+}
+
+# Prepare a step: echo  tag \x1f display_cmd \x1f host \x1f danger  (nonzero on error).
+_flow_prepare() {
+    local s="$1" run resolved eff cmd danger host="" disp
+    run=$(printf '%s' "$s" | jq -r '.run // empty')
+    [ -z "$run" ] && { echo "step has no 'run'" >&2; return 2; }
+    local args=() a
+    while IFS= read -r a; do
+        if [ "${a:0:1}" = "@" ]; then host="${a:1}"; else args+=("$a"); fi
+    done < <(printf '%s' "$s" | jq -r '.args[]? // empty')
+    resolved=$(resolve_tag_or_alias "$run")
+    [ -z "$resolved" ] && { echo "unknown command '$run'" >&2; return 2; }
+    eff=$(get_effective_commands)
+    cmd=$(printf '%s' "$eff" | jq -r --arg t "$resolved" '.[$t].command // empty')
+    danger=$(printf '%s' "$eff" | jq -r --arg t "$resolved" '.[$t].danger // false')
+    [ -z "$cmd" ] && { echo "command '$run' empty" >&2; return 2; }
+    [ -n "$host" ] && { _host_exists "$host" || { echo "unknown host '$host'" >&2; return 2; }; cmd=$(apply_host_vars "$cmd" "$host"); }
+    disp=$(resolve_command "$cmd" "${args[@]}") || return 1
+    printf '%s\x1f%s\x1f%s\x1f%s' "$resolved" "$disp" "$host" "$danger"
+}
+
+# Execute one workflow step. Updates state + captures; returns the step exit.
+_flow_exec_one() {
+    local s="$1" state="$2" idx="$3"
+    local when id
+    when=$(printf '%s' "$s" | jq -r '.when // empty')
+    id=$(printf '%s' "$s" | jq -r '.register // .run // empty'); [ -z "$id" ] && id="step$idx"
+
+    if [ -n "$when" ] && ! _flow_eval_when "$when" "$state"; then
+        echo -e "${YELLOW}↷ skip${NC} [$id]  (when: $when)"
+        return 0
+    fi
+
+    local prep tag disp host danger
+    prep=$(_flow_prepare "$s") || { echo -e "${RED}✗ [$id] $prep${NC}"; return 1; }
+    IFS=$'\x1f' read -r tag disp host danger <<< "$prep"
+    local label="$id"; [ -n "$host" ] && label="$id@$host"
+
+    if [ "$danger" = "true" ] && [ "$DRY_RUN" != true ]; then
+        echo -e "${RED}${BOLD}DANGER:${NC} $disp"
+        read -p "Run this command marked dangerous? (y/N): " confirm
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            echo -e "${YELLOW}Skipped '$label'.${NC}"; return 0
+        fi
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${YELLOW}▷ [$label]${NC} $disp"
+        _flow_state_set "$state" "$id" 0 ""
+        return 0
+    fi
+
+    local exec_cmd remote
+    exec_cmd=$(resolve_secrets "$disp")
+    remote=$(printf '%s' "$s" | jq -r '.remote // false')
+    if [ "$remote" = "true" ] && [ -n "$host" ]; then
+        exec_cmd=$(build_ssh_cmd "$host" "$exec_cmd") || return 1
+    fi
+
+    local retry tmo trun=()
+    retry=$(printf '%s' "$s" | jq -r '.retry // 0')
+    tmo=$(printf '%s' "$s" | jq -r '.timeout // 0')
+    if [ "$tmo" -gt 0 ] 2>/dev/null; then
+        if command -v timeout >/dev/null 2>&1; then trun=(timeout "$tmo")
+        elif command -v gtimeout >/dev/null 2>&1; then trun=(gtimeout "$tmo"); fi
+    fi
+
+    echo -e "${CYAN}▶ [$label]${NC} $disp"
+    local attempt=0 status out
+    while :; do
+        out=$("${trun[@]}" bash -c "$exec_cmd"); status=$?
+        [ "$status" -eq 0 ] && break
+        attempt=$((attempt + 1))
+        [ "$attempt" -gt "$retry" ] && break
+        echo -e "  ${YELLOW}retry $attempt/$retry (exit $status)${NC}"
+    done
+    printf '%s\n' "$out"
+    _flow_apply_captures "$s" "$out"
+    _flow_state_set "$state" "$id" "$status" "$out"
+    record_history "$tag" "$disp" "$host" "$status" "0"
+    echo -e "  ${CYAN}exit $status${NC}"
+    return $status
+}
+
+# Execute a parallel block: substeps run concurrently, results applied in order.
+_flow_exec_parallel() {
+    local s="$1" state="$2" idx="$3"
+    local tmpd; tmpd=$(mktemp -d "${TMPDIR:-/tmp}/cmdrpar.XXXXXX")
+    echo -e "${BOLD}${CYAN}∥ parallel block${NC}"
+    local k=0 sub
+    while IFS= read -r sub; do
+        ( _flow_exec_one "$sub" "$state" "${idx}p${k}" >"$tmpd/$k.out" 2>&1; echo $? >"$tmpd/$k.rc" ) &
+        k=$((k + 1))
+    done < <(printf '%s' "$s" | jq -c '.parallel[]')
+    wait
+
+    local combined=0 j=0 rc
+    while [ "$j" -lt "$k" ]; do
+        sed 's/^/  /' "$tmpd/$j.out" 2>/dev/null
+        rc=$(cat "$tmpd/$j.rc" 2>/dev/null || echo 1)
+        [ "$rc" != "0" ] && combined="$rc"
+        j=$((j + 1))
+    done
+    rm -rf "$tmpd"
+    return "$combined"
+}
+
+# Run a workflow by name or file.
+flow_run() {
+    local ref="$1" wf name n i=0 overall=0 st step coe state
+    wf=$(_flow_load "$ref") || exit 1
+    if ! printf '%s' "$wf" | jq -e '(.steps | type) == "array"' >/dev/null 2>&1; then
+        echo -e "${RED}Error:${NC} Workflow has no 'steps' array."; exit 1
+    fi
+    name=$(printf '%s' "$wf" | jq -r '.name // empty'); [ -z "$name" ] && name="$ref"
+
+    echo -e "${BOLD}${GREEN}Running workflow: $name${NC}"
+    [ "$DRY_RUN" = true ] && echo -e "${YELLOW}(dry run — conditions on captured values may be approximate)${NC}"
+    echo ""
+
+    state=$(_mktemp_beside "$WORKFLOWS_FILE"); echo '{"steps":{}}' > "$state"
+    n=$(printf '%s' "$wf" | jq '.steps | length')
+    while [ "$i" -lt "$n" ]; do
+        step=$(printf '%s' "$wf" | jq -c --argjson i "$i" '.steps[$i]')
+        if printf '%s' "$step" | jq -e 'has("parallel")' >/dev/null 2>&1; then
+            _flow_exec_parallel "$step" "$state" "$i"; st=$?
+        else
+            _flow_exec_one "$step" "$state" "$i"; st=$?
+        fi
+        if [ "$st" -ne 0 ]; then
+            coe=$(printf '%s' "$step" | jq -r '.continue_on_error // false')
+            if [ "$coe" != "true" ] && [ "$DRY_RUN" != true ]; then
+                echo -e "\n${RED}Workflow stopped at step $((i + 1)) (exit $st).${NC}"
+                rm -f "$state"; return "$st"
+            fi
+            overall="$st"
+        fi
+        i=$((i + 1)); echo ""
+    done
+    rm -f "$state"
+    echo -e "${GREEN}Workflow '$name' completed.${NC}"
+    return "$overall"
+}
+
+# Store a workflow file under its declared .name.
+flow_import() {
+    local file="$1"
+    if [ -z "$file" ] || [ ! -f "$file" ]; then echo -e "${RED}Error:${NC} Workflow file not found."; exit 1; fi
+    if ! jq -e . "$file" >/dev/null 2>&1; then echo -e "${RED}Error:${NC} Not valid JSON."; exit 1; fi
+    local name; name=$(jq -r '.name // empty' "$file")
+    [ -z "$name" ] && { echo -e "${RED}Error:${NC} Workflow needs a top-level \"name\"."; exit 1; }
+    if ! jq -e '(.steps | type) == "array"' "$file" >/dev/null 2>&1; then
+        echo -e "${RED}Error:${NC} Workflow needs a \"steps\" array."; exit 1
+    fi
+    name=$(sanitize_tag "$name") || exit 1
+    [ ! -f "$WORKFLOWS_FILE" ] && echo "{}" > "$WORKFLOWS_FILE"
+    local doc tmp; doc=$(cat "$file")
+    tmp=$(_mktemp_beside "$WORKFLOWS_FILE")
+    jq --arg n "$name" --argjson d "$doc" '. + {($n): $d}' "$WORKFLOWS_FILE" > "$tmp" && mv "$tmp" "$WORKFLOWS_FILE"
+    log_event "INFO" "Workflow imported: $name"
+    echo -e "${GREEN}Workflow imported:${NC} $name ($(printf '%s' "$doc" | jq '.steps | length') steps)"
+}
+
+# List stored workflows.
+flow_list() {
+    if [ ! -f "$WORKFLOWS_FILE" ] || [ "$(jq 'length' "$WORKFLOWS_FILE" 2>/dev/null || echo 0)" -eq 0 ]; then
+        echo -e "${YELLOW}No workflows stored.${NC} Import one with 'cmdr --flow import <file.json>'."
+        return 0
+    fi
+    echo -e "${BOLD}${YELLOW}Workflows:${NC}"
+    echo ""
+    jq -r 'to_entries[] | "\(.key)\t\(.value.steps | length)"' "$WORKFLOWS_FILE" \
+        | while IFS=$'\t' read -r nm cnt; do
+            printf "  ${CYAN}%-22s${NC} %s steps\n" "$nm" "$cnt"
+        done
+}
+
+# Print a stored workflow (or file) as pretty JSON.
+flow_show() {
+    local ref="$1" wf
+    wf=$(_flow_load "$ref") || exit 1
+    printf '%s' "$wf" | jq .
+}
+
+# ----------------------------------------------------------------------------
+# Section 12c: Lint
+# Validate command stores, packs, and workflows for common mistakes.
+# ----------------------------------------------------------------------------
+
+# Lint one command-store JSON file. Prints issues and adds to LINT_TOTAL
+# (runs in the current shell, not a subshell, so the counter persists).
+_lint_store() {
+    local file="$1" label="$2" k
+    [ -f "$file" ] || return 0
+    if ! jq -e . "$file" >/dev/null 2>&1; then
+        echo -e "  ${RED}✗${NC} $label: invalid JSON"; LINT_TOTAL=$((LINT_TOTAL + 1)); return 0
+    fi
+    # Empty commands
+    while IFS= read -r k; do
+        [ -z "$k" ] && continue
+        echo -e "  ${RED}✗${NC} $label: '$k' has an empty command"; LINT_TOTAL=$((LINT_TOTAL + 1))
+    done < <(jq -r 'to_entries[] | select((.value.command // "") == "") | .key' "$file" 2>/dev/null)
+    # Bad tag names
+    while IFS= read -r k; do
+        [ -z "$k" ] && continue
+        echo -e "  ${RED}✗${NC} $label: tag '$k' has invalid characters"; LINT_TOTAL=$((LINT_TOTAL + 1))
+    done < <(jq -r 'keys[] | select(test("^[a-zA-Z0-9_-]+$") | not)' "$file" 2>/dev/null)
+    # Unbalanced placeholder braces
+    while IFS= read -r k; do
+        [ -z "$k" ] && continue
+        echo -e "  ${YELLOW}!${NC} $label: '$k' has unbalanced { } in its command"; LINT_TOTAL=$((LINT_TOTAL + 1))
+    done < <(jq -r 'to_entries[] | .key as $k | (.value.command // "") as $c
+        | ($c | gsub("[^{]";"") | length) as $o | ($c | gsub("[^}]";"") | length) as $cl
+        | select($o != $cl) | $k' "$file" 2>/dev/null)
+}
+
+LINT_TOTAL=0
+lint_all() {
+    LINT_TOTAL=0
+    echo -e "${BOLD}${YELLOW}Linting command stores${NC}"
+    _lint_store "$COMMANDS_FILE" "workspace"
+    if [ -f "$LOCAL_COMMANDS_FILE" ] && is_local_trusted; then
+        _lint_store "$LOCAL_COMMANDS_FILE" "local"
+    fi
+
+    echo -e "${BOLD}${YELLOW}Linting packs${NC}"
+    local pf
+    for pf in "$PACKS_DIR"/*.json; do
+        [ -f "$pf" ] || continue
+        _lint_store "$pf" "pack:$(basename "$pf" .json)"
+    done
+
+    if [ -f "$WORKFLOWS_FILE" ] && [ "$(jq 'length' "$WORKFLOWS_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+        echo -e "${BOLD}${YELLOW}Linting workflows${NC}"
+        local eff; eff=$(get_effective_commands)
+        local wf step_tag
+        while IFS= read -r wf; do
+            while IFS= read -r step_tag; do
+                [ -z "$step_tag" ] && continue
+                if ! printf '%s' "$eff" | jq -e --arg t "$step_tag" 'has($t) or any(.[]; (.aliases // []) | index($t))' >/dev/null 2>&1; then
+                    echo -e "  ${RED}✗${NC} workflow '$wf': step references unknown command '$step_tag'"
+                    LINT_TOTAL=$((LINT_TOTAL + 1))
+                fi
+            done < <(jq -r --arg w "$wf" '.[$w].steps[]? | (.run // empty), (.parallel[]?.run // empty)' "$WORKFLOWS_FILE" 2>/dev/null)
+        done < <(jq -r 'keys[]' "$WORKFLOWS_FILE" 2>/dev/null)
+    fi
+
+    echo ""
+    if [ "$LINT_TOTAL" -eq 0 ]; then
+        echo -e "${GREEN}✓ No problems found.${NC}"; return 0
+    fi
+    echo -e "${RED}✗ $LINT_TOTAL problem(s) found.${NC}"; return 1
+}
+
+# ----------------------------------------------------------------------------
+# Section 12d: Git-backed Sync
+# Commit and push the data directory so command stores, hosts, findings, etc.
+# can be versioned/shared across machines or operators.
+# ----------------------------------------------------------------------------
+
+# Refuse to operate on the CMDR source/install directory.
+_sync_guard() {
+    if [ -f "$DATA_DIR/cmdr.sh" ] && [ -f "$DATA_DIR/cmdr_functions.sh" ]; then
+        echo -e "${RED}Error:${NC} Data dir looks like the CMDR install dir ($DATA_DIR)."
+        echo -e "Set ${CYAN}CMDR_DATA_DIR${NC} to a separate directory to use sync."
+        return 1
+    fi
+    return 0
+}
+
+sync_set_remote() {
+    local url="$1"
+    [ -z "$url" ] && { echo -e "${RED}Error:${NC} Usage: cmdr --sync-remote <git-url>"; exit 1; }
+    _sync_guard || exit 1
+    ( cd "$DATA_DIR" || exit 1
+      [ -d .git ] || git init -q
+      if git remote | grep -qx origin; then git remote set-url origin "$url"; else git remote add origin "$url"; fi )
+    echo -e "${GREEN}Sync remote set:${NC} $url"
+}
+
+sync_data() {
+    local msg="${1:-cmdr sync}"
+    _sync_guard || exit 1
+    if ! command -v git >/dev/null 2>&1; then echo -e "${RED}Error:${NC} git not installed."; exit 1; fi
+    ( cd "$DATA_DIR" || exit 1
+      [ -d .git ] || { git init -q; echo -e "${GREEN}Initialized git repo in $DATA_DIR${NC}"; }
+      git add -A
+      if git diff --cached --quiet; then
+          echo -e "${YELLOW}Nothing to sync.${NC}"
+      else
+          git commit -q -m "$msg"
+          echo -e "${GREEN}Committed:${NC} $msg"
+      fi
+      if git remote | grep -qx origin; then
+          local br; br=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+          if git push -u origin "$br" 2>/dev/null; then
+              echo -e "${GREEN}Pushed to origin/$br.${NC}"
+          else
+              echo -e "${YELLOW}Push failed (check remote/credentials).${NC}"
+          fi
+      else
+          echo -e "${YELLOW}No 'origin' remote.${NC} Set one with 'cmdr --sync-remote <url>'."
+      fi )
+}
+
+# ----------------------------------------------------------------------------
 # Section 13: Help System
 # Main help display and per-subcommand help pages.
 # ----------------------------------------------------------------------------
@@ -2191,13 +2763,47 @@ display_subcommand_help() {
         finding)
             echo "Usage: cmdr --finding <severity> <host> \"title\" [--evidence path]"
             echo "       cmdr --findings            List findings"
-            echo "       cmdr --report [file]       Render a markdown engagement report"
+            echo "       cmdr --report [file] [--format md|csv|html|pdf]"
             echo ""
             echo "Severity: critical | high | medium | low | info   (use '-' for no host)"
+            echo "Report format is inferred from the file extension, or set with --format."
+            echo "html/pdf need pandoc; csv exports findings only."
             echo ""
             echo "Examples:"
             echo "  cmdr --finding high dc01 \"Unauth WinRM\" --evidence outputs/winrm_x.log"
             echo "  cmdr --report engagement.md"
+            echo "  cmdr --report findings.csv"
+            echo "  cmdr --report report.html"
+            ;;
+        flow)
+            echo "Usage: cmdr --flow run <name|file.json>   Run a workflow"
+            echo "       cmdr --flow import <file.json>     Store a workflow by its name"
+            echo "       cmdr --flow list                   List stored workflows"
+            echo "       cmdr --flow show <name|file>       Print a workflow"
+            echo ""
+            echo "A workflow is JSON: { \"name\": \"...\", \"steps\": [ <step>, ... ] }."
+            echo "Step fields: run, args (incl @host), when, capture {VAR:regex},"
+            echo "register, retry, timeout, remote, continue_on_error; or { parallel: [..] }."
+            echo ""
+            echo "Conditions: 'env:NAME == x', 'step:id.exit == 0', 'env:X contains y',"
+            echo "'NAME matches re', 'env:X exists'; join with && or ||, negate with !."
+            echo ""
+            echo "  cmdr -n --flow run recon    # dry-run: show steps and decisions"
+            ;;
+        secret)
+            echo "Usage: cmdr --secret NAME <provider>:<ref>   Register a secret"
+            echo "       cmdr --secrets                         List secrets (no values)"
+            echo "       cmdr --secret-clear NAME               Remove a secret"
+            echo ""
+            echo "Providers: pass:path | cmd:'shell' | env:VAR | age:file | file:path"
+            echo ""
+            echo "Reference a secret as {NAME} in any command. It is fetched only at"
+            echo "execution time, so it never appears in the stored command, the run"
+            echo "history, or the on-screen command line."
+            echo ""
+            echo "Examples:"
+            echo "  cmdr --secret DBPASS pass:work/db"
+            echo "  cmdr -a psql 'psql -h {TARGET} -U admin' db   # PGPASSWORD via {PGPASSWORD}"
             ;;
     esac
 }
@@ -2261,8 +2867,18 @@ display_help() {
     echo "  --outputs [tag]                    Show saved outputs"
     echo "  --finding <sev> <host> \"title\"     Record a finding"
     echo "  --findings                         List findings"
-    echo "  --report [file]                    Markdown engagement report"
+    echo "  --report [file] [--format fmt]     Report (md/csv/html/pdf)"
     echo "  --history [n]                      Show recent run history"
+    echo ""
+    echo -e "${YELLOW}Workflows & Secrets:${NC}"
+    echo "  --flow run <name|file>             Run a conditional workflow"
+    echo "  --flow import|list|show ...        Manage stored workflows"
+    echo "  --secret NAME provider:ref         Register a runtime secret"
+    echo "  --secrets / --secret-clear NAME    List / remove secrets"
+    echo ""
+    echo -e "${YELLOW}Maintenance:${NC}"
+    echo "  --lint                             Validate stores, packs, workflows"
+    echo "  --sync [msg] / --sync-remote <url> Git-version the data dir"
     echo ""
     echo -e "${YELLOW}Import/Export & Packs:${NC}"
     echo "  -x <file>              Export commands to JSON"

@@ -7,6 +7,8 @@ commands_log.log
 .cmdr_hosts.json
 .cmdr_findings.json
 .cmdr_history.json
+.cmdr_workflows.json
+.cmdr_secrets.json
 .cmdr_active_workspace
 .cmdr_trusted.json
 my_commands.json

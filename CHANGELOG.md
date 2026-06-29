@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0]
+
+### Added
+- **Workflow engine** (`--flow run|list|import|show`): JSON workflows of
+  conditional, capturing, retrying, optionally-parallel steps. Steps support
+  `run`, `args` (incl. `@host`), `when`, `capture`, `register`, `retry`,
+  `timeout`, `remote`, `continue_on_error`, and `parallel` blocks. Safe
+  condition DSL (`env:`/`step:` with `== != contains matches exists`, joined by
+  `&& / ||`, negatable). Honors dry-run.
+- **Secrets** (`--secret`, `--secrets`, `--secret-clear`): map `{NAME}` to a
+  provider (`pass`/`cmd`/`env`/`age`/`file`). Resolved only at execution time,
+  so secrets never appear in the stored command, run history, or the on-screen
+  command line. Clipboard copy resolves them (for pasting).
+- **`--lint`**: validates command stores, packs, and workflows (JSON, empty
+  commands, bad tag names, unbalanced placeholders, unknown workflow step refs).
+- **Report formats**: `--report` infers format from the file extension or
+  `--format md|csv|html|pdf`. CSV exports findings; HTML/PDF via pandoc.
+- **Git-backed sync** (`--sync [msg]`, `--sync-remote <url>`): version/share the
+  data dir; refuses to run against the CMDR install directory.
+- **`@host` tab completion** and completion for workflows/secrets/formats.
+
 ## [3.1.0]
 
 ### Added

@@ -196,6 +196,78 @@ okc  "invalid-opt"    1                           "$C" --nonsense
 "$C" -a litarg 'echo' default >/dev/null 2>&1
 okg  "end-of-opts"    "DRY RUN"                   "$C" -n -r litarg -- -n hello
 
+section "SECRETS"
+newdata
+"$C" -a usepw 'echo pw is {SECRETX} done' db >/dev/null 2>&1
+okg  "secret-set"     "Secret set"                "$C" --secret SECRETX 'cmd:echo hunter2'
+okg  "secret-list"    "SECRETX"                   "$C" --secrets
+okg  "secret-exec"    "pw is hunter2 done"        "$C" -r usepw
+okg  "secret-redact"  "pw is \{SECRETX\} done"    "$C" -r usepw   # display keeps the token
+# the secret value must not be written to history
+"$C" -r usepw >/dev/null 2>&1
+okng "secret-nohist"  "hunter2"                   cat "$CMDR_DATA_DIR/.cmdr_history.json"
+okg  "secret-clear"   "cleared"                   "$C" --secret-clear SECRETX
+
+section "WORKFLOW ENGINE"
+newdata
+"$C" -a s_scan 'echo PORT 445 open' net >/dev/null 2>&1
+"$C" -a s_smb  'echo smb-enum' net >/dev/null 2>&1
+"$C" -a s_web  'echo web-fuzz' net >/dev/null 2>&1
+WF="$CMDR_DATA_DIR/wf.json"
+cat > "$WF" <<JSON
+{ "name": "recon", "steps": [
+  { "run": "s_scan", "register": "scan", "capture": { "PORTS": "[0-9]+" } },
+  { "run": "s_smb", "when": "env:PORTS == 445" },
+  { "run": "s_web", "when": "env:PORTS == 9999" },
+  { "run": "s_smb", "when": "step:scan.exit == 0", "retry": 1 },
+  { "parallel": [ { "run": "s_smb" }, { "run": "s_web" } ] }
+] }
+JSON
+okg  "flow-import"    "imported"                  "$C" --flow import "$WF"
+okg  "flow-list"      "recon"                     "$C" --flow list
+okg  "flow-show"      "steps"                     "$C" --flow show recon
+okg  "flow-capture"   "captured \{PORTS\} = 445"  "$C" --flow run recon
+okg  "flow-when-true" "smb-enum"                  "$C" --flow run recon
+okg  "flow-when-skip" "skip.*s_web"               "$C" --flow run recon
+okg  "flow-parallel"  "parallel block"           "$C" --flow run recon
+okg  "flow-dryrun"    "dry run"                   "$C" -n --flow run recon
+okc  "flow-missing"   1                           "$C" --flow run no_such_flow
+# condition operators
+newdata
+"$C" -a c_t 'echo hit' net >/dev/null 2>&1
+"$C" --env Z=hello >/dev/null 2>&1
+printf '{ "name":"c", "steps":[ {"run":"c_t","when":"env:Z contains ell"} ] }' > "$CMDR_DATA_DIR/c.json"
+okg  "flow-contains"  "hit"                       "$C" --flow run "$CMDR_DATA_DIR/c.json"
+printf '{ "name":"c2", "steps":[ {"run":"c_t","when":"env:Z == nope"} ] }' > "$CMDR_DATA_DIR/c2.json"
+okng "flow-neg"       "hit"                       "$C" --flow run "$CMDR_DATA_DIR/c2.json"
+
+section "LINT"
+newdata
+"$C" -a okcmd 'echo {A}' net >/dev/null 2>&1
+okc  "lint-clean"     0                           "$C" --lint
+cat > "$CMDR_DATA_DIR/my_commands.json" <<'JSON'
+{ "ok": {"command":"echo ok","category":"x"},
+  "bad name": {"command":"echo y","category":"x"},
+  "empty": {"command":"","category":"x"} }
+JSON
+okc  "lint-detects"   1                           "$C" --lint
+okg  "lint-msg"       "empty command"             "$C" --lint
+
+section "REPORT FORMATS"
+newdata
+"$C" --finding high h1 'RCE' --evidence /tmp/e >/dev/null 2>&1
+"$C" --finding low - 'Banner' >/dev/null 2>&1
+"$C" --report "$CMDR_DATA_DIR/r.csv" >/dev/null 2>&1
+okg  "report-csv-hdr" "severity,host,title"       cat "$CMDR_DATA_DIR/r.csv"
+okg  "report-csv-row" "\"high\",\"h1\",\"RCE\""   cat "$CMDR_DATA_DIR/r.csv"
+"$C" --report "$CMDR_DATA_DIR/r2.out" --format csv >/dev/null 2>&1
+okg  "report-fmt-flag" "severity,host"            cat "$CMDR_DATA_DIR/r2.out"
+
+section "SYNC"
+newdata
+okg  "sync-init"      "Committed|Nothing"         "$C" --sync "snap"
+okg  "sync-source-guard" "install dir"            bash -c "CMDR_DATA_DIR='$ROOT' '$C' --sync"
+
 section "CONCURRENCY (portable lock)"
 newdata
 for i in 1 2 3 4 5 6; do ( "$C" -a "c$i" "echo $i" x >/dev/null 2>&1 ) & done; wait
