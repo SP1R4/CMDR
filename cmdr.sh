@@ -9,7 +9,7 @@
 # See `cmdr -h` for full usage or `cmdr <flag> --help` for per-command help.
 # ============================================================================
 
-CMDR_VERSION="3.0.0"
+CMDR_VERSION="3.1.0"
 
 # Resolve the script's install directory (follows symlinks)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
@@ -35,7 +35,7 @@ done
 # ---------------------------------------------------------------------------
 DATA_DIR="${CMDR_DATA_DIR:-$SCRIPT_DIR}"
 LOG_FILE="$DATA_DIR/commands_log.log"
-LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/cmdr.lock"
+LOCK_DIR="${XDG_RUNTIME_DIR:-/tmp}/cmdr.lock.d"
 WORKSPACE_FILE="$DATA_DIR/.cmdr_active_workspace"
 PACKS_DIR="$SCRIPT_DIR/packs"
 
@@ -58,8 +58,16 @@ BACKUP_FILE="$ACTIVE_DATA_DIR/.my_commands.json.bak"
 ENV_FILE="$ACTIVE_DATA_DIR/.cmdr_env.json"
 NOTES_FILE="$ACTIVE_DATA_DIR/.cmdr_notes.json"
 PLAYBOOKS_FILE="$ACTIVE_DATA_DIR/.cmdr_playbooks.json"
+HOSTS_FILE="$ACTIVE_DATA_DIR/.cmdr_hosts.json"
+FINDINGS_FILE="$ACTIVE_DATA_DIR/.cmdr_findings.json"
+HISTORY_FILE="$ACTIVE_DATA_DIR/.cmdr_history.json"
+HISTORY_MAX=200
 OUTPUTS_DIR="$ACTIVE_DATA_DIR/outputs"
 LOCAL_COMMANDS_FILE="$(pwd)/.cmdr.json"
+
+# Trust store for project-local .cmdr.json files (global, keyed by absolute path).
+# Local commands are only merged/executed when their current content is trusted.
+TRUST_FILE="$DATA_DIR/.cmdr_trusted.json"
 
 # ---------------------------------------------------------------------------
 # Global modifier flags (pre-scanned before argument parsing)
@@ -72,6 +80,18 @@ CMDR_DESC=""
 CMDR_ALIASES=()
 CMDR_FORCE_YES=false
 
+# Feature flags collected during argument parsing
+CMDR_CAPTURE=""        # --capture VAR[:regex]  (run: stdout -> env var)
+CMDR_ON=""             # --on HOST              (run: execute over SSH)
+CMDR_ALL_HOSTS=false   # --all-hosts           (run: fan across all hosts)
+CMDR_DANGER=false      # --danger              (add/edit: mark destructive)
+CMDR_EVIDENCE=""       # --evidence PATH       (finding: attach evidence)
+CMDR_HOST_NAME=""      # --name                (host add)
+CMDR_HOST_OS=""        # --os                  (host add)
+CMDR_HOST_USER=""      # --user                (host add)
+CMDR_HOST_PORT=""      # --port                (host add)
+CMDR_HOST_HOSTNAME=""  # --hostname            (host add)
+
 # Write target: defaults to workspace commands, overridden by --local
 WRITE_COMMANDS_FILE="$COMMANDS_FILE"
 
@@ -83,6 +103,7 @@ if [ ! -f "$FUNCTIONS_FILE" ]; then
     echo -e "${RED}Error:${NC} Functions file '$FUNCTIONS_FILE' not found."
     exit 1
 fi
+# shellcheck source=cmdr_functions.sh
 source "$FUNCTIONS_FILE"
 
 if ! command -v jq >/dev/null; then
@@ -93,30 +114,52 @@ fi
 initialize_files
 
 # ---------------------------------------------------------------------------
-# Lock management (single-instance protection)
+# Lock management (serializes data-store writes only)
 # ---------------------------------------------------------------------------
-acquire_lock() {
-    if [ -f "$LOCK_FILE" ]; then
-        local pid
-        pid=$(cat "$LOCK_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
-            log_event "DEBUG" "Removing stale lock file (PID $pid)"
-            rm -f "$LOCK_FILE"
-        fi
-    fi
+# Only mutating actions acquire the lock, and only for the short duration of
+# the write. Read-only and long-running actions (run, interactive, search) stay
+# lock-free so a second terminal is never blocked by a running command.
+LOCK_ACQUIRED=false
 
-    exec 200>"$LOCK_FILE"
-    if ! flock -n 200; then
-        log_event "ERROR" "Another instance is running ($LOCK_FILE)"
-        echo -e "${RED}Another instance is running.${NC}"
-        exit 1
-    fi
-    echo "$$" > "$LOCK_FILE"
-    log_event "DEBUG" "Lock acquired (PID $$)"
+# Portable, atomic lock via `mkdir` (works on macOS and Linux without flock).
+# `mkdir` on an existing dir fails atomically, giving mutual exclusion. Since
+# writes are short, a contending writer waits briefly (bounded) rather than
+# failing outright, so concurrent quick writes queue instead of being dropped.
+# A stale lock (owner PID no longer running) is reclaimed immediately.
+acquire_lock() {
+    local tries=0 max_tries=50   # ~5s total at 0.1s per retry
+    while true; do
+        if mkdir "$LOCK_DIR" 2>/dev/null; then
+            echo "$$" > "$LOCK_DIR/pid" 2>/dev/null
+            LOCK_ACQUIRED=true
+            log_event "DEBUG" "Lock acquired (PID $$)"
+            return 0
+        fi
+
+        # Lock exists: reclaim it if the owning process is gone.
+        local pid
+        pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+        if [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
+            log_event "DEBUG" "Removing stale lock (PID $pid)"
+            rm -rf "$LOCK_DIR"
+            continue
+        fi
+
+        tries=$((tries + 1))
+        if [ "$tries" -ge "$max_tries" ]; then
+            log_event "ERROR" "Another instance is running ($LOCK_DIR)"
+            echo -e "${RED}Another instance is running.${NC}"
+            exit 1
+        fi
+        sleep 0.1
+    done
 }
 
 cleanup() {
-    rm -f "$LOCK_FILE"
+    # Only remove the lock if this process actually holds it, otherwise a
+    # read-only invocation would delete a lock held by a concurrent writer.
+    [ "$LOCK_ACQUIRED" = true ] || return 0
+    rm -rf "$LOCK_DIR"
     log_event "DEBUG" "Lock released (PID $$)"
 }
 trap cleanup EXIT INT TERM
@@ -125,15 +168,20 @@ trap cleanup EXIT INT TERM
 # Main: argument parsing and dispatch
 # ---------------------------------------------------------------------------
 main() {
-    acquire_lock
-
     if [ "$#" -eq 0 ]; then
+        # On an interactive terminal with fzf, jump straight into the picker.
+        if [ -t 1 ] && command -v fzf >/dev/null 2>&1; then
+            pick_command
+            exit $?
+        fi
         display_help
         exit 1
     fi
 
-    # Pre-scan global modifier flags so they're active for all operations
+    # Pre-scan global modifier flags so they're active for all operations.
+    # Stop at "--" so flags after it are treated as positional command args.
     for arg in "$@"; do
+        [ "$arg" = "--" ] && break
         case "$arg" in
             -v)        VERBOSITY="DEBUG"; log_event "DEBUG" "Verbosity set to DEBUG" ;;
             -n|--dry-run) DRY_RUN=true; log_event "DEBUG" "Dry-run mode enabled" ;;
@@ -161,11 +209,12 @@ main() {
                 [ "${1:-}" = "--help" ] && { display_subcommand_help "add"; exit 0; }
                 [ "$#" -ge 1 ] && [[ "${1:-}" != --* ]] && action_args+=("$1") && shift
                 [ "$#" -ge 1 ] && [[ "${1:-}" != --* ]] && action_args+=("$1") && shift
-                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
+                [ "$#" -ge 1 ] && [[ "${1:-}" != --* ]] && action_args+=("$1") && shift
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
-                        --desc)  shift; [ "$#" -ge 1 ] && CMDR_DESC="$1" && shift ;;
-                        --alias) shift; [ "$#" -ge 1 ] && CMDR_ALIASES+=("$1") && shift ;;
+                        --desc)   shift; [ "$#" -ge 1 ] && CMDR_DESC="$1" && shift ;;
+                        --alias)  shift; [ "$#" -ge 1 ] && CMDR_ALIASES+=("$1") && shift ;;
+                        --danger) CMDR_DANGER=true; shift ;;
                         -v|-n|--dry-run|--local|--save) shift ;;
                         *) break ;;
                     esac
@@ -177,11 +226,12 @@ main() {
                 [ "${1:-}" = "--help" ] && { display_subcommand_help "edit"; exit 0; }
                 [ "$#" -ge 1 ] && [[ "${1:-}" != --* ]] && action_args+=("$1") && shift
                 [ "$#" -ge 1 ] && [[ "${1:-}" != --* ]] && action_args+=("$1") && shift
-                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
+                [ "$#" -ge 1 ] && [[ "${1:-}" != --* ]] && action_args+=("$1") && shift
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
-                        --desc)  shift; [ "$#" -ge 1 ] && CMDR_DESC="$1" && shift ;;
-                        --alias) shift; [ "$#" -ge 1 ] && CMDR_ALIASES+=("$1") && shift ;;
+                        --desc)   shift; [ "$#" -ge 1 ] && CMDR_DESC="$1" && shift ;;
+                        --alias)  shift; [ "$#" -ge 1 ] && CMDR_ALIASES+=("$1") && shift ;;
+                        --danger) CMDR_DANGER=true; shift ;;
                         -v|-n|--dry-run|--local|--save) shift ;;
                         *) break ;;
                     esac
@@ -211,6 +261,10 @@ main() {
                 [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
+                        --)          shift; while [ "$#" -gt 0 ]; do action_args+=("$1"); shift; done; break ;;
+                        --capture)   shift; [ "$#" -ge 1 ] && CMDR_CAPTURE="$1" && shift ;;
+                        --on)        shift; [ "$#" -ge 1 ] && CMDR_ON="$1" && shift ;;
+                        --all-hosts) CMDR_ALL_HOSTS=true; shift ;;
                         -v|-n|--dry-run|--local|--save) shift ;;
                         -*) break ;;
                         *) action_args+=("$1"); shift ;;
@@ -229,6 +283,7 @@ main() {
                 [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
+                        --) shift; while [ "$#" -gt 0 ]; do action_args+=("$1"); shift; done; break ;;
                         -v|-n|--dry-run|--local|--save) shift ;;
                         -*) break ;;
                         *) action_args+=("$1"); shift ;;
@@ -314,6 +369,64 @@ main() {
                 [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
                 ;;
 
+            # --- Hosts ---
+            --host)
+                shift
+                [ "${1:-}" = "--help" ] && { display_subcommand_help "host"; exit 0; }
+                case "${1:-}" in
+                    add)
+                        action="host_add"; shift
+                        [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift  # ip
+                        while [ "$#" -gt 0 ]; do
+                            case "$1" in
+                                --name)     shift; [ "$#" -ge 1 ] && CMDR_HOST_NAME="$1" && shift ;;
+                                --hostname) shift; [ "$#" -ge 1 ] && CMDR_HOST_HOSTNAME="$1" && shift ;;
+                                --os)       shift; [ "$#" -ge 1 ] && CMDR_HOST_OS="$1" && shift ;;
+                                --user)     shift; [ "$#" -ge 1 ] && CMDR_HOST_USER="$1" && shift ;;
+                                --port)     shift; [ "$#" -ge 1 ] && CMDR_HOST_PORT="$1" && shift ;;
+                                -v|-n|--dry-run|--local|--save) shift ;;
+                                *) break ;;
+                            esac
+                        done
+                        ;;
+                    list|ls) action="host_list"; shift ;;
+                    rm|del)  action="host_rm"; shift; [ "$#" -ge 1 ] && action_args+=("$1") && shift ;;
+                    *)
+                        echo -e "${RED}Error:${NC} Unknown host subcommand '${1:-}'. Use add/list/rm." >&2
+                        exit 1 ;;
+                esac
+                ;;
+
+            # --- Findings & Reporting ---
+            --finding)
+                action="add_finding"; shift
+                [ "${1:-}" = "--help" ] && { display_subcommand_help "finding"; exit 0; }
+                # Positionals allow a bare "-" (no-host sentinel); only "--flags" stop them.
+                [ "$#" -ge 1 ] && [[ "${1:-}" != --* ]] && action_args+=("$1") && shift  # severity
+                [ "$#" -ge 1 ] && [[ "${1:-}" != --* ]] && action_args+=("$1") && shift  # host
+                [ "$#" -ge 1 ] && [[ "${1:-}" != --* ]] && action_args+=("$1") && shift  # title
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --evidence) shift; [ "$#" -ge 1 ] && CMDR_EVIDENCE="$1" && shift ;;
+                        -v|-n|--dry-run|--local|--save) shift ;;
+                        *) break ;;
+                    esac
+                done
+                ;;
+            --findings)
+                action="list_findings"; shift
+                ;;
+            --report)
+                action="report"; shift
+                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift  # optional output file
+                ;;
+
+            # --- History ---
+            --history)
+                action="show_history"; shift
+                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift  # optional count
+                ;;
+
             # --- Packs ---
             --pack)
                 shift
@@ -351,6 +464,17 @@ main() {
                 action="interactive"; shift
                 [ "${1:-}" = "--help" ] && { display_subcommand_help "interactive"; exit 0; }
                 ;;
+            --pick)         action="pick"; shift ;;
+            --lock-workspace)
+                action="lock_workspace"; shift
+                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
+                ;;
+            --unlock-workspace)
+                action="unlock_workspace"; shift
+                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
+                ;;
+            --trust)        action="trust_local"; shift ;;
+            --untrust)      action="untrust_local"; shift ;;
             -u|--undo)      action="undo"; shift ;;
             -h|--help)      action="help"; shift ;;
             -V|--version)   echo "CMDR v${CMDR_VERSION}"; exit 0 ;;
@@ -365,6 +489,12 @@ main() {
                 ;;
         esac
     done
+
+    # ----- Lock only mutating actions, for the duration of the write -----
+    case "$action" in
+        add|edit|delete|set_env|clear_env|create_playbook|add_note|install|load_pack|undo|switch_workspace|trust_local|untrust_local|host_add|host_rm|add_finding|lock_workspace|unlock_workspace)
+            acquire_lock ;;
+    esac
 
     # ----- Dispatch -----
     case "$action" in
@@ -398,6 +528,24 @@ main() {
         show_notes)       show_notes "${action_args[0]:-}" ;;
         show_outputs)     show_outputs "${action_args[0]:-}" ;;
 
+        # Hosts
+        host_add)         host_add "${action_args[0]:-}" ;;
+        host_list)        host_list ;;
+        host_rm)          host_rm "${action_args[0]:-}" ;;
+
+        # Findings & Reporting
+        add_finding)      add_finding "${action_args[0]:-}" "${action_args[1]:-}" "${action_args[2]:-}" ;;
+        list_findings)    list_findings ;;
+        report)           generate_report "${action_args[0]:-}" ;;
+
+        # History
+        show_history)     show_history "${action_args[0]:-20}" ;;
+
+        # Picker & encrypted workspaces
+        pick)             pick_command ;;
+        lock_workspace)   lock_workspace "${action_args[0]:-}" ;;
+        unlock_workspace) unlock_workspace "${action_args[0]:-}" ;;
+
         # Import/Export & Packs
         extract)          extract_commands "${action_args[@]}" ;;
         logs)             extract_logs "${action_args[@]}" ;;
@@ -405,12 +553,19 @@ main() {
         list_packs)       list_packs ;;
         load_pack)        load_pack "${action_args[0]:-}" ;;
 
+        # Trust
+        trust_local)      trust_local ;;
+        untrust_local)    untrust_local ;;
+
         # General
         interactive)      interactive_mode ;;
         undo)             undo_command ;;
         help)             display_help ;;
         *)                display_help; exit 1 ;;
     esac
+
+    # Propagate the dispatched action's exit code (the EXIT trap preserves it).
+    exit $?
 }
 
 main "$@"

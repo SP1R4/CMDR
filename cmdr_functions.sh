@@ -44,6 +44,17 @@ initialize_files() {
     fi
 }
 
+# Create a temp file in the SAME directory as the target so the subsequent
+# `mv` is an atomic, same-filesystem rename. Using /tmp would degrade the
+# rename to a non-atomic copy when the data dir is on another filesystem.
+_mktemp_beside() {
+    local target="$1"
+    local dir
+    dir="$(dirname "$target")"
+    [ -d "$dir" ] || mkdir -p "$dir"
+    mktemp "$dir/.cmdr.tmp.XXXXXX"
+}
+
 # Leveled logger. Writes to LOG_FILE based on VERBOSITY threshold.
 # Usage: log_event "INFO" "message"
 log_event() {
@@ -198,15 +209,94 @@ undo_command() {
 # Merge environment variables into command templates.
 # ----------------------------------------------------------------------------
 
+# Hash a file's contents (used to pin trusted project-local command files).
+_hash_file() {
+    local f="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$f" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$f" | awk '{print $1}'
+    else
+        # Weak fallback when no SHA tool exists: byte count.
+        wc -c < "$f" | tr -d ' '
+    fi
+}
+
+# True only when the current project-local .cmdr.json exists and its content
+# matches the hash recorded in the trust store. Untrusted/modified files fail.
+is_local_trusted() {
+    [ -f "$LOCAL_COMMANDS_FILE" ] || return 1
+    [ -f "$TRUST_FILE" ] || return 1
+    local current stored
+    current=$(_hash_file "$LOCAL_COMMANDS_FILE")
+    stored=$(jq -r --arg p "$LOCAL_COMMANDS_FILE" '.[$p] // empty' "$TRUST_FILE" 2>/dev/null)
+    [ -n "$stored" ] && [ "$stored" = "$current" ]
+}
+
+# Print a one-time notice when a non-empty but untrusted .cmdr.json is present.
+# Called from main-shell entry points (not subshells) so it fires once.
+notify_untrusted_local() {
+    if [ -f "$LOCAL_COMMANDS_FILE" ] \
+       && [ "$(jq 'length' "$LOCAL_COMMANDS_FILE" 2>/dev/null || echo 0)" -gt 0 ] \
+       && ! is_local_trusted; then
+        echo -e "${YELLOW}Note:${NC} Ignoring untrusted .cmdr.json in $(pwd)." >&2
+        echo -e "      Review it, then run ${CYAN}cmdr --trust${NC} to enable it." >&2
+    fi
+}
+
+# Record the current local file's hash as trusted (quiet; used after --local writes).
+_retrust_local() {
+    [ -f "$LOCAL_COMMANDS_FILE" ] || return 0
+    [ ! -f "$TRUST_FILE" ] && echo "{}" > "$TRUST_FILE"
+    local h tmp_file
+    h=$(_hash_file "$LOCAL_COMMANDS_FILE")
+    tmp_file=$(_mktemp_beside "$TRUST_FILE")
+    jq --arg p "$LOCAL_COMMANDS_FILE" --arg h "$h" '. + {($p): $h}' "$TRUST_FILE" > "$tmp_file" \
+        && mv "$tmp_file" "$TRUST_FILE"
+}
+
 # Return merged JSON of global/workspace + local commands.
-# Local entries override global entries with the same tag.
+# Local entries override global entries with the same tag, but only when the
+# local file is trusted (see is_local_trusted) to avoid auto-running commands
+# from an untrusted directory's .cmdr.json.
 get_effective_commands() {
     if [ -f "$LOCAL_COMMANDS_FILE" ] && jq -e . "$LOCAL_COMMANDS_FILE" >/dev/null 2>&1 \
-       && [ "$(jq 'length' "$LOCAL_COMMANDS_FILE" 2>/dev/null)" -gt 0 ]; then
+       && [ "$(jq 'length' "$LOCAL_COMMANDS_FILE" 2>/dev/null)" -gt 0 ] \
+       && is_local_trusted; then
         jq -s '.[0] * .[1]' "$COMMANDS_FILE" "$LOCAL_COMMANDS_FILE"
     else
         cat "$COMMANDS_FILE"
     fi
+}
+
+# Approve the current directory's .cmdr.json so its commands are merged and runnable.
+trust_local() {
+    if [ ! -f "$LOCAL_COMMANDS_FILE" ]; then
+        echo -e "${RED}Error:${NC} No .cmdr.json in $(pwd)."
+        exit 1
+    fi
+    if ! jq -e . "$LOCAL_COMMANDS_FILE" >/dev/null 2>&1; then
+        echo -e "${RED}Error:${NC} .cmdr.json in $(pwd) is not valid JSON."
+        exit 1
+    fi
+    _retrust_local
+    log_event "INFO" "Trusted local file: $LOCAL_COMMANDS_FILE"
+    echo -e "${GREEN}Trusted:${NC} $LOCAL_COMMANDS_FILE"
+}
+
+# Revoke trust for the current directory's .cmdr.json.
+untrust_local() {
+    if [ ! -f "$TRUST_FILE" ] \
+       || ! jq -e --arg p "$LOCAL_COMMANDS_FILE" 'has($p)' "$TRUST_FILE" >/dev/null 2>&1; then
+        echo -e "${YELLOW}Not trusted:${NC} $LOCAL_COMMANDS_FILE"
+        return 0
+    fi
+    local tmp_file
+    tmp_file=$(_mktemp_beside "$TRUST_FILE")
+    jq --arg p "$LOCAL_COMMANDS_FILE" 'del(.[$p])' "$TRUST_FILE" > "$tmp_file" \
+        && mv "$tmp_file" "$TRUST_FILE"
+    log_event "INFO" "Untrusted local file: $LOCAL_COMMANDS_FILE"
+    echo -e "${GREEN}Untrusted:${NC} $LOCAL_COMMANDS_FILE"
 }
 
 # Resolve a user-supplied name to a canonical tag. Checks direct tag match
@@ -256,34 +346,62 @@ resolve_env_vars() {
     echo "$cmd"
 }
 
-# Full command resolution pipeline: environment variables first, then
-# positional arguments for any remaining {placeholder} tokens.
+# Full command resolution pipeline. Placeholder forms, resolved left-to-right:
+#   {VAR}            env var, else next positional arg, else interactive prompt
+#   {VAR:=default}   env var, else next positional arg, else 'default' (no prompt)
+#   {VAR:?}          env var, else next positional arg, else hard error (required)
+# Returns non-zero if a required placeholder cannot be satisfied.
 resolve_command() {
     local cmd="$1"
     shift
     local run_args=("$@")
 
-    # Step 1: substitute environment variables
+    # Step 1: substitute plain {KEY} env vars up front (back-compat / fast path).
     cmd=$(resolve_env_vars "$cmd")
 
-    # Step 2: substitute positional parameters for remaining placeholders
-    local placeholders
-    mapfile -t placeholders < <(grep -oE '\{[a-zA-Z_][a-zA-Z0-9_]*\}' <<< "$cmd" | awk '!seen[$0]++')
+    # Step 2: unified left-to-right pass over remaining placeholders.
+    local i=0
+    while :; do
+        local token
+        token=$(printf '%s' "$cmd" \
+            | grep -oE '\{[a-zA-Z_][a-zA-Z0-9_]*(:=[^}]*|:\?)?\}' | head -1)
+        [ -z "$token" ] && break
 
-    if [ "${#placeholders[@]}" -gt 0 ] && [ -n "${placeholders[0]}" ]; then
-        local i=0
-        for placeholder in "${placeholders[@]}"; do
-            local name="${placeholder:1:${#placeholder}-2}"
-            if [ "$i" -lt "${#run_args[@]}" ]; then
-                cmd="${cmd//"$placeholder"/${run_args[$i]}}"
-            else
-                local value
-                read -p "Enter value for $name: " value
-                cmd="${cmd//"$placeholder"/$value}"
-            fi
-            ((i++))
-        done
-    fi
+        local inner="${token:1:${#token}-2}"   # strip surrounding { }
+        local name mod="" default=""
+        if [[ "$inner" == *:=* ]]; then
+            name="${inner%%:=*}"; default="${inner#*:=}"; mod="default"
+        elif [[ "$inner" == *":?" ]]; then
+            name="${inner%:?}"; mod="required"
+        else
+            name="$inner"
+        fi
+
+        # Prefer an env value (covers the modifier forms, which step 1 skips).
+        local value="" envval=""
+        if [ -f "$ENV_FILE" ]; then
+            envval=$(jq -r --arg k "$name" '.[$k] // empty' "$ENV_FILE" 2>/dev/null)
+        fi
+
+        if [ -n "$envval" ]; then
+            value="$envval"
+        elif [ "$i" -lt "${#run_args[@]}" ]; then
+            value="${run_args[$i]}"; ((i++))
+        elif [ "$mod" = "default" ]; then
+            value="$default"
+        elif [ "$mod" = "required" ]; then
+            echo -e "${RED}Error:${NC} Required value '{$name}' not provided." >&2
+            return 1
+        elif [ "$DRY_RUN" = true ]; then
+            # Never block on a prompt during a dry run; show the gap instead.
+            value="<$name>"
+        else
+            read -p "Enter value for $name: " value
+        fi
+
+        # Replace every occurrence of this exact token in one shot.
+        cmd="${cmd//"$token"/$value}"
+    done
 
     echo "$cmd"
 }
@@ -323,6 +441,10 @@ validate_aliases() {
 # Switch to a named workspace. Creates the workspace directory if needed.
 switch_workspace() {
     local name="$1"
+
+    # Sanitize: workspace names become path components, so reject anything
+    # outside [a-zA-Z0-9_-] to prevent path traversal (e.g. -w ../../etc).
+    name=$(sanitize_tag "$name") || exit 1
 
     if [ "$name" = "default" ]; then
         rm -f "$WORKSPACE_FILE"
@@ -373,6 +495,14 @@ list_workspaces() {
             [ "$ws_name" = "$ACTIVE_WORKSPACE" ] && ws_marker=" ${GREEN}(active)${NC}"
             echo -e "  ${CYAN}${ws_name}${NC}${ws_marker}  ($count commands)"
         done < <(find "$DATA_DIR/workspaces" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+
+        # Locked (encrypted) workspaces
+        while IFS= read -r blob; do
+            [ -f "$blob" ] || continue
+            local locked_name
+            locked_name=$(basename "$blob" .cmdrlock)
+            echo -e "  ${CYAN}${locked_name}${NC}  ${YELLOW}(locked)${NC}"
+        done < <(find "$DATA_DIR/workspaces" -mindepth 1 -maxdepth 1 -name '*.cmdrlock' 2>/dev/null | sort)
     fi
 }
 
@@ -396,7 +526,7 @@ set_env_var() {
     [ ! -f "$ENV_FILE" ] && echo "{}" > "$ENV_FILE"
 
     local tmp_file
-    tmp_file=$(mktemp /tmp/cmdr.XXXXXX.json)
+    tmp_file=$(_mktemp_beside "$ENV_FILE")
     jq --arg key "$key" --arg val "$value" '. + {($key): $val}' "$ENV_FILE" > "$tmp_file"
     mv "$tmp_file" "$ENV_FILE"
 
@@ -436,7 +566,7 @@ clear_env_var() {
     fi
 
     local tmp_file
-    tmp_file=$(mktemp /tmp/cmdr.XXXXXX.json)
+    tmp_file=$(_mktemp_beside "$ENV_FILE")
     jq --arg key "$key" 'del(.[$key])' "$ENV_FILE" > "$tmp_file"
     mv "$tmp_file" "$ENV_FILE"
 
@@ -496,10 +626,14 @@ add_command() {
         entry=$(echo "$entry" | jq --argjson aliases "$aliases_json" '. + {aliases: $aliases}')
     fi
 
+    if [ "$CMDR_DANGER" = true ]; then
+        entry=$(echo "$entry" | jq '. + {danger: true}')
+    fi
+
     backup_commands "$WRITE_COMMANDS_FILE"
 
     local tmp_file
-    tmp_file=$(mktemp /tmp/cmdr.XXXXXX.json)
+    tmp_file=$(_mktemp_beside "$WRITE_COMMANDS_FILE")
     if ! jq --arg tag "$tag" --argjson entry "$entry" \
         '. + {($tag): $entry}' "$WRITE_COMMANDS_FILE" > "$tmp_file" 2>/dev/null; then
         log_event "ERROR" "jq failed while adding command"
@@ -508,6 +642,9 @@ add_command() {
         exit 1
     fi
     mv "$tmp_file" "$WRITE_COMMANDS_FILE"
+
+    # Authoring your own local file implies trust; keep its hash current.
+    [ "$USE_LOCAL" = true ] && _retrust_local
 
     local scope=""
     [ "$USE_LOCAL" = true ] && scope=" (local)"
@@ -569,11 +706,14 @@ edit_command() {
         aliases_json=$(printf '%s\n' "${CMDR_ALIASES[@]}" | jq -R . | jq -s .)
         update=$(echo "$update" | jq --argjson aliases "$aliases_json" '. + {aliases: $aliases}')
     fi
+    if [ "$CMDR_DANGER" = true ]; then
+        update=$(echo "$update" | jq '. + {danger: true}')
+    fi
 
     backup_commands "$WRITE_COMMANDS_FILE"
 
     local tmp_file
-    tmp_file=$(mktemp /tmp/cmdr.XXXXXX.json)
+    tmp_file=$(_mktemp_beside "$WRITE_COMMANDS_FILE")
     if ! jq --arg tag "$tag" --argjson update "$update" \
         '.[$tag] = (.[$tag] * $update)' "$WRITE_COMMANDS_FILE" > "$tmp_file" 2>/dev/null; then
         log_event "ERROR" "jq failed while editing command"
@@ -582,6 +722,7 @@ edit_command() {
         exit 1
     fi
     mv "$tmp_file" "$WRITE_COMMANDS_FILE"
+    [ "$USE_LOCAL" = true ] && _retrust_local
 
     log_event "INFO" "Edited command: tag='$tag', command='$new_cmd'"
     echo -e "${GREEN}Command '$tag' updated successfully.${NC}"
@@ -617,7 +758,7 @@ delete_command() {
     backup_commands "$WRITE_COMMANDS_FILE"
 
     local tmp_file
-    tmp_file=$(mktemp /tmp/cmdr.XXXXXX.json)
+    tmp_file=$(_mktemp_beside "$WRITE_COMMANDS_FILE")
     if ! jq --arg tag "$tag" 'del(.[$tag])' "$WRITE_COMMANDS_FILE" > "$tmp_file" 2>/dev/null; then
         log_event "ERROR" "jq failed while deleting command"
         echo -e "${RED}Error:${NC} Failed to delete command."
@@ -625,6 +766,7 @@ delete_command() {
         exit 1
     fi
     mv "$tmp_file" "$WRITE_COMMANDS_FILE"
+    [ "$USE_LOCAL" = true ] && _retrust_local
 
     log_event "INFO" "Deleted command with tag '$tag'"
     echo -e "${GREEN}Command '$tag' deleted successfully.${NC}"
@@ -646,16 +788,20 @@ _display_commands_from_file() {
 
     while IFS= read -r category; do
         echo -e "  ${BOLD}${GREEN}[$category]${NC}"
-        while IFS=$'\t' read -r tag cmd desc alias_str; do
+        while IFS=$'\037' read -r tag cmd desc alias_str danger; do
             # Highlight {placeholder} tokens in yellow
             local cmd_display
             cmd_display=$(echo "$cmd" | sed $'s/{[a-zA-Z_][a-zA-Z0-9_]*}/\033[0;33m&\033[0m/g')
 
+            # Mark dangerous commands
+            local danger_mark=""
+            [ "$danger" = "true" ] && danger_mark=" ${RED}${BOLD}[!]${NC}"
+
             local tag_line
             if [ -n "$alias_str" ]; then
-                tag_line=$(printf "    ${CYAN}%-20s${NC}  %b  ${CYAN}(aka: %s)${NC}" "$tag" "$cmd_display" "$alias_str")
+                tag_line=$(printf "    ${CYAN}%-20s${NC}  %b%b  ${CYAN}(aka: %s)${NC}" "$tag" "$cmd_display" "$danger_mark" "$alias_str")
             else
-                tag_line=$(printf "    ${CYAN}%-20s${NC}  %b" "$tag" "$cmd_display")
+                tag_line=$(printf "    ${CYAN}%-20s${NC}  %b%b" "$tag" "$cmd_display" "$danger_mark")
             fi
             echo -e "$tag_line"
 
@@ -664,7 +810,7 @@ _display_commands_from_file() {
             fi
         done < <(jq -r --arg cat "$category" \
             'to_entries[] | select(.value.category == $cat) |
-            "\(.key)\t\(.value.command)\t\(.value.description // "")\t\(.value.aliases // [] | join(", "))"' \
+            [.key, .value.command, (.value.description // ""), (.value.aliases // [] | join(", ")), (.value.danger // false | tostring)] | join("\u001f")' \
             "$file")
         echo ""
     done < <(jq -r '[to_entries[] | .value.category] | unique[]' "$file")
@@ -676,9 +822,13 @@ _display_commands_from_file() {
 show_commands() {
     log_event "DEBUG" "Showing commands"
 
+    notify_untrusted_local
+
     local global_count=0 local_count=0
     [ -s "$COMMANDS_FILE" ] && global_count=$(jq 'length' "$COMMANDS_FILE" 2>/dev/null || echo 0)
-    if [ -f "$LOCAL_COMMANDS_FILE" ] && jq -e . "$LOCAL_COMMANDS_FILE" >/dev/null 2>&1; then
+    # Only count/show local commands when the local file is trusted.
+    if [ -f "$LOCAL_COMMANDS_FILE" ] && jq -e . "$LOCAL_COMMANDS_FILE" >/dev/null 2>&1 \
+       && is_local_trusted; then
         local_count=$(jq 'length' "$LOCAL_COMMANDS_FILE" 2>/dev/null || echo 0)
     fi
 
@@ -717,6 +867,7 @@ search_commands() {
 
     log_event "DEBUG" "Searching for: '$keyword'"
 
+    notify_untrusted_local
     local effective
     effective=$(get_effective_commands)
 
@@ -728,7 +879,7 @@ search_commands() {
             (.value.category | ascii_downcase | contains($kw | ascii_downcase)) or
             ((.value.description // "") | ascii_downcase | contains($kw | ascii_downcase)) or
             ((.value.aliases // []) | any(ascii_downcase | contains($kw | ascii_downcase)))
-        ) | "\(.value.category)\t\(.key)\t\(.value.command)\t\(.value.description // "")\t\(.value.aliases // [] | join(", "))"')
+        ) | [.value.category, .key, .value.command, (.value.description // ""), (.value.aliases // [] | join(", "))] | join("\u001f")')
 
     if [ -z "$results" ]; then
         echo -e "${YELLOW}No commands matching '$keyword'.${NC}"
@@ -739,7 +890,7 @@ search_commands() {
     echo ""
     printf "  ${CYAN}%-12s  %-16s  %-30s  %s${NC}\n" "CATEGORY" "TAG" "COMMAND" "DESCRIPTION"
 
-    while IFS=$'\t' read -r cat tag cmd desc alias_str; do
+    while IFS=$'\037' read -r cat tag cmd desc alias_str; do
         local cmd_display
         cmd_display=$(echo "$cmd" | sed $'s/{[a-zA-Z_][a-zA-Z0-9_]*}/\033[0;33m&\033[0m/g')
 
@@ -760,11 +911,20 @@ search_commands() {
 # output capture (--save), dry-run, clipboard copy, and command chaining.
 # ----------------------------------------------------------------------------
 
-# Run a stored command by tag or alias with full resolution pipeline.
+# Run a stored command by tag or alias. Supports host targeting (@name / --on /
+# --all-hosts), output capture (--capture), danger confirmation, and history.
 run_command() {
     local tag="$1"
     shift
     local run_args=("$@")
+
+    notify_untrusted_local
+
+    # History re-run: `cmdr -r !` or `cmdr -r last`
+    if [ "$tag" = "!" ] || [ "$tag" = "last" ]; then
+        rerun_last
+        return $?
+    fi
 
     tag=$(sanitize_tag "$tag") || exit 1
 
@@ -780,8 +940,9 @@ run_command() {
     local effective
     effective=$(get_effective_commands)
 
-    local cmd
+    local cmd danger
     cmd=$(echo "$effective" | jq -r --arg tag "$tag" '.[$tag].command // empty')
+    danger=$(echo "$effective" | jq -r --arg tag "$tag" '.[$tag].danger // false')
 
     if [ -z "$cmd" ]; then
         log_event "ERROR" "Command '$tag' not found"
@@ -789,30 +950,106 @@ run_command() {
         exit 1
     fi
 
-    # Full resolution: env vars -> positional params
-    cmd=$(resolve_command "$cmd" "${run_args[@]}")
+    # Pull any @host selector out of the positional args.
+    local host_sel="" filtered_args=()
+    local a
+    for a in "${run_args[@]}"; do
+        if [ "${a:0:1}" = "@" ]; then host_sel="${a:1}"; else filtered_args+=("$a"); fi
+    done
+    run_args=("${filtered_args[@]}")
+    # --on implies a host target for SSH.
+    [ -n "$CMDR_ON" ] && [ -z "$host_sel" ] && host_sel="$CMDR_ON"
 
-    # Dry-run: print without executing
+    # Build the list of hosts to run against ("" = a single local, host-less run).
+    local hosts=()
+    if [ "$CMDR_ALL_HOSTS" = true ]; then
+        local h
+        while IFS= read -r h; do [ -n "$h" ] && hosts+=("$h"); done < <(list_host_names)
+        if [ "${#hosts[@]}" -eq 0 ]; then
+            echo -e "${RED}Error:${NC} No hosts defined. Add one with 'cmdr --host add'."
+            exit 1
+        fi
+    elif [ -n "$host_sel" ]; then
+        hosts=("$host_sel")
+    else
+        hosts=("")
+    fi
+
+    local overall=0
+    local hcmd label rcmd st
+    for h in "${hosts[@]}"; do
+        hcmd="$cmd"
+        label="$tag"
+        if [ -n "$h" ]; then
+            if ! _host_exists "$h"; then
+                echo -e "${RED}Error:${NC} Unknown host '$h'."
+                overall=1; continue
+            fi
+            hcmd=$(apply_host_vars "$hcmd" "$h")
+            label="$tag@$h"
+        fi
+        if ! rcmd=$(resolve_command "$hcmd" "${run_args[@]}"); then
+            overall=1; continue
+        fi
+        _run_one "$tag" "$label" "$rcmd" "$h" "$danger"
+        st=$?
+        [ "$st" -ne 0 ] && overall=$st
+    done
+    return $overall
+}
+
+# Execute a single fully-resolved invocation: danger gate, dry-run, local or
+# remote (SSH) execution, output capture/save, timing, and history.
+_run_one() {
+    local tag="$1" label="$2" cmd="$3" host="$4" danger="$5"
+
+    # Danger gate: always confirm, even under -y, unless dry-running.
+    if [ "$danger" = "true" ] && [ "$DRY_RUN" != true ]; then
+        echo -e "${RED}${BOLD}DANGER:${NC} $cmd"
+        read -p "Run this command marked dangerous? (y/N): " confirm
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            echo -e "${YELLOW}Skipped '$label'.${NC}"
+            return 0
+        fi
+    fi
+
+    # Wrap for remote execution when --on targets a host.
+    local exec_cmd="$cmd"
+    if [ -n "$CMDR_ON" ] && [ -n "$host" ]; then
+        if ! exec_cmd=$(build_ssh_cmd "$host" "$cmd"); then
+            return 1
+        fi
+    fi
+
     if [ "$DRY_RUN" = true ]; then
-        echo -e "${YELLOW}[DRY RUN]${NC} Would execute: $cmd"
-        log_event "INFO" "Dry run for '$tag': $cmd"
+        echo -e "${YELLOW}[DRY RUN]${NC} (${label}) Would execute: $exec_cmd"
+        log_event "INFO" "Dry run for '$label': $exec_cmd"
         return 0
     fi
 
-    echo -e "${GREEN}Running command:${NC} $cmd"
+    echo -e "${GREEN}Running (${label}):${NC} $cmd"
 
-    local start_time status
+    local start_time status output output_file=""
     start_time=$(date +%s)
 
-    # Execute with optional output capture
-    if [ "$SAVE_OUTPUT" = true ]; then
+    if [ -n "$CMDR_CAPTURE" ]; then
+        # Capture stdout into a var (stderr still streams to the terminal).
+        output=$(bash -c "$exec_cmd")
+        status=$?
+        printf '%s\n' "$output"
+        if [ "$SAVE_OUTPUT" = true ]; then
+            mkdir -p "$OUTPUTS_DIR"
+            output_file="$OUTPUTS_DIR/${tag}_$(date +%Y%m%d_%H%M%S).log"
+            printf '%s\n' "$output" > "$output_file"
+        fi
+        _capture_store "$output"
+    elif [ "$SAVE_OUTPUT" = true ]; then
         mkdir -p "$OUTPUTS_DIR"
-        local output_file="$OUTPUTS_DIR/${tag}_$(date +%Y%m%d_%H%M%S).log"
-        bash -c "$cmd" 2>&1 | tee "$output_file"
+        output_file="$OUTPUTS_DIR/${tag}_$(date +%Y%m%d_%H%M%S).log"
+        bash -c "$exec_cmd" 2>&1 | tee "$output_file"
         status=${PIPESTATUS[0]}
-        echo -e "${CYAN}Output saved to:${NC} $output_file"
     else
-        bash -c "$cmd"
+        bash -c "$exec_cmd"
         status=$?
     fi
 
@@ -821,9 +1058,37 @@ run_command() {
     elapsed=$((end_time - start_time))
     duration=$(format_duration "$elapsed")
 
+    [ -n "$output_file" ] && echo -e "${CYAN}Output saved to:${NC} $output_file"
     echo -e "${CYAN}Completed in ${duration} (exit: $status)${NC}"
-    log_event "INFO" "Ran command '$tag': $cmd (exit: $status, ${duration})"
+    record_history "$tag" "$cmd" "$host" "$status" "$duration"
+    log_event "INFO" "Ran '$label': $cmd (exit: $status, ${duration})"
     return $status
+}
+
+# Store captured output into a workspace env var. CMDR_CAPTURE is "VAR" or
+# "VAR:regex"; with a regex, the first match is stored, else the trimmed output.
+_capture_store() {
+    local output="$1"
+    local var="${CMDR_CAPTURE%%:*}"
+    local regex=""
+    [ "$CMDR_CAPTURE" != "$var" ] && regex="${CMDR_CAPTURE#*:}"
+
+    var=$(sanitize_tag "$var") || return 1
+
+    local value
+    if [ -n "$regex" ]; then
+        value=$(printf '%s\n' "$output" | grep -oE "$regex" | head -1)
+    else
+        value=$(printf '%s' "$output" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    fi
+
+    [ ! -f "$ENV_FILE" ] && echo "{}" > "$ENV_FILE"
+    local tmp_file
+    tmp_file=$(_mktemp_beside "$ENV_FILE")
+    jq --arg k "$var" --arg v "$value" '. + {($k): $v}' "$ENV_FILE" > "$tmp_file" \
+        && mv "$tmp_file" "$ENV_FILE"
+    log_event "INFO" "Captured env var $var from '$tag'"
+    echo -e "${GREEN}Captured${NC} {$var} = ${value}"
 }
 
 # Run multiple tagged commands in sequence. Stops on first failure.
@@ -860,6 +1125,7 @@ clipboard_copy() {
     shift
     local run_args=("$@")
 
+    notify_untrusted_local
     tag=$(sanitize_tag "$tag") || exit 1
 
     local resolved
@@ -904,6 +1170,468 @@ clipboard_copy() {
 }
 
 # ----------------------------------------------------------------------------
+# Section 8b: Host / Target Model
+# Per-workspace inventory of hosts. Commands reference {TARGET}/{RHOST}/{OS}/
+# {RUSER}/{RPORT}; selecting a host (@name, --on, --all-hosts) fills them.
+# ----------------------------------------------------------------------------
+
+# True if a host with the given name exists.
+_host_exists() {
+    [ -f "$HOSTS_FILE" ] && jq -e --arg n "$1" 'has($n)' "$HOSTS_FILE" >/dev/null 2>&1
+}
+
+# Read a single field of a host (ip/hostname/os/user/port).
+_host_get() {
+    [ -f "$HOSTS_FILE" ] || return 1
+    jq -r --arg n "$1" --arg f "$2" '.[$n][$f] // empty' "$HOSTS_FILE" 2>/dev/null
+}
+
+# Print all host names, one per line.
+list_host_names() {
+    [ -f "$HOSTS_FILE" ] || return 0
+    jq -r 'keys[]' "$HOSTS_FILE" 2>/dev/null
+}
+
+# Substitute host placeholders in a command for the named host.
+apply_host_vars() {
+    local cmd="$1" name="$2"
+    local ip host os user port target
+    ip=$(_host_get "$name" ip)
+    host=$(_host_get "$name" hostname)
+    os=$(_host_get "$name" os)
+    user=$(_host_get "$name" user)
+    port=$(_host_get "$name" port)
+    target="${ip:-$host}"
+
+    cmd="${cmd//\{TARGET\}/$target}"
+    cmd="${cmd//\{RHOST\}/$target}"
+    [ -n "$host" ] && cmd="${cmd//\{RHOSTNAME\}/$host}"
+    [ -n "$os" ]   && cmd="${cmd//\{OS\}/$os}"
+    [ -n "$user" ] && cmd="${cmd//\{RUSER\}/$user}"
+    [ -n "$port" ] && cmd="${cmd//\{RPORT\}/$port}"
+    echo "$cmd"
+}
+
+# Build an `ssh ...` command string (for bash -c) that runs cmd on a host.
+build_ssh_cmd() {
+    local host="$1" cmd="$2"
+    local ip hostname user port target dest
+    ip=$(_host_get "$host" ip)
+    hostname=$(_host_get "$host" hostname)
+    user=$(_host_get "$host" user)
+    port=$(_host_get "$host" port)
+    target="${ip:-$hostname}"
+
+    if [ -z "$target" ]; then
+        echo -e "${RED}Error:${NC} Host '$host' has no ip/hostname for SSH." >&2
+        return 1
+    fi
+
+    dest="$target"
+    [ -n "$user" ] && dest="$user@$target"
+
+    if [ -n "$port" ]; then
+        printf 'ssh -p %q %q %q' "$port" "$dest" "$cmd"
+    else
+        printf 'ssh %q %q' "$dest" "$cmd"
+    fi
+}
+
+# Add or update a host. IP is positional; name/os/user/port/hostname via flags.
+host_add() {
+    local ip="$1"
+    if [ -z "$ip" ]; then
+        echo -e "${RED}Error:${NC} Usage: cmdr --host add <ip> --name <name> [--hostname h] [--os o] [--user u] [--port p]"
+        exit 1
+    fi
+
+    local name="${CMDR_HOST_NAME:-$ip}"
+    name=$(sanitize_tag "$name") || exit 1
+
+    [ ! -f "$HOSTS_FILE" ] && echo "{}" > "$HOSTS_FILE"
+
+    local entry
+    entry=$(jq -n --arg ip "$ip" '{ip: $ip}')
+    [ -n "$CMDR_HOST_HOSTNAME" ] && entry=$(echo "$entry" | jq --arg v "$CMDR_HOST_HOSTNAME" '. + {hostname: $v}')
+    [ -n "$CMDR_HOST_OS" ]       && entry=$(echo "$entry" | jq --arg v "$CMDR_HOST_OS" '. + {os: $v}')
+    [ -n "$CMDR_HOST_USER" ]     && entry=$(echo "$entry" | jq --arg v "$CMDR_HOST_USER" '. + {user: $v}')
+    [ -n "$CMDR_HOST_PORT" ]     && entry=$(echo "$entry" | jq --arg v "$CMDR_HOST_PORT" '. + {port: $v}')
+
+    local tmp_file
+    tmp_file=$(_mktemp_beside "$HOSTS_FILE")
+    jq --arg n "$name" --argjson e "$entry" '. + {($n): $e}' "$HOSTS_FILE" > "$tmp_file" \
+        && mv "$tmp_file" "$HOSTS_FILE"
+
+    log_event "INFO" "Host added: $name ($ip)"
+    echo -e "${GREEN}Host added:${NC} $name ($ip)"
+}
+
+# List all hosts in the active workspace.
+host_list() {
+    if [ ! -f "$HOSTS_FILE" ] || [ "$(jq 'length' "$HOSTS_FILE" 2>/dev/null || echo 0)" -eq 0 ]; then
+        echo -e "${YELLOW}No hosts defined.${NC}"
+        return 0
+    fi
+
+    echo -e "${BOLD}${YELLOW}Hosts:${NC}"
+    if [ "$ACTIVE_WORKSPACE" != "default" ]; then
+        echo -e "${CYAN}Workspace: $ACTIVE_WORKSPACE${NC}"
+    fi
+    echo ""
+    printf "  ${CYAN}%-16s  %-16s  %-20s  %-10s  %s${NC}\n" "NAME" "IP" "HOSTNAME" "OS" "USER"
+    # Use ASCII Unit Separator (0x1f) so empty middle fields aren't collapsed
+    # by read's IFS-whitespace merging.
+    jq -r 'to_entries[] | [.key, (.value.ip//""), (.value.hostname//""), (.value.os//""), (.value.user//"")] | join("\u001f")' "$HOSTS_FILE" \
+        | while IFS=$'\037' read -r name ip hn os user; do
+            printf "  %-16s  %-16s  %-20s  %-10s  %s\n" "$name" "$ip" "$hn" "$os" "$user"
+        done
+}
+
+# Remove a host by name.
+host_rm() {
+    local name="$1"
+    if [ -z "$name" ]; then
+        echo -e "${RED}Error:${NC} Usage: cmdr --host rm <name>"
+        exit 1
+    fi
+    if ! _host_exists "$name"; then
+        echo -e "${YELLOW}Host '$name' not found.${NC}"
+        return 0
+    fi
+    local tmp_file
+    tmp_file=$(_mktemp_beside "$HOSTS_FILE")
+    jq --arg n "$name" 'del(.[$n])' "$HOSTS_FILE" > "$tmp_file" && mv "$tmp_file" "$HOSTS_FILE"
+    log_event "INFO" "Host removed: $name"
+    echo -e "${GREEN}Host removed:${NC} $name"
+}
+
+# ----------------------------------------------------------------------------
+# Section 8c: Run History
+# Append-only (capped) log of executed commands. Enables review and re-run.
+# ----------------------------------------------------------------------------
+
+# Record one run. Capped to the last $HISTORY_MAX entries.
+record_history() {
+    local tag="$1" cmd="$2" host="$3" status="$4" duration="$5"
+    [ ! -f "$HISTORY_FILE" ] && echo "[]" > "$HISTORY_FILE"
+    local ts
+    ts=$(date +"%Y-%m-%d %T")
+    local tmp_file
+    tmp_file=$(_mktemp_beside "$HISTORY_FILE")
+    jq --arg ts "$ts" --arg tag "$tag" --arg cmd "$cmd" --arg host "$host" \
+       --arg st "$status" --arg dur "$duration" --argjson max "$HISTORY_MAX" \
+       '. + [{timestamp:$ts, tag:$tag, command:$cmd, host:$host, exit:($st|tonumber), duration:$dur}] | .[-$max:]' \
+       "$HISTORY_FILE" > "$tmp_file" 2>/dev/null && mv "$tmp_file" "$HISTORY_FILE"
+}
+
+# Show recent history (default 20 entries, newest first).
+show_history() {
+    local count="${1:-20}"
+    if [ ! -f "$HISTORY_FILE" ] || [ "$(jq 'length' "$HISTORY_FILE" 2>/dev/null || echo 0)" -eq 0 ]; then
+        echo -e "${YELLOW}No run history.${NC}"
+        return 0
+    fi
+
+    echo -e "${BOLD}${YELLOW}Run history (last $count):${NC}"
+    echo ""
+    jq -r --argjson n "$count" '.[-$n:] | reverse | .[]
+        | [.timestamp, (.exit|tostring), .tag, (.host // ""), .command] | join("\u001f")' "$HISTORY_FILE" \
+        | while IFS=$'\037' read -r ts ex tag host cmd; do
+            local mark="${GREEN}ok${NC}"
+            [ "$ex" != "0" ] && mark="${RED}$ex${NC}"
+            local label="$tag"
+            [ -n "$host" ] && label="$tag@$host"
+            printf "  ${CYAN}%s${NC}  [%b]  %-18s  %s\n" "$ts" "$mark" "$label" "$cmd"
+        done
+}
+
+# Re-run the most recent history entry (by tag, re-resolving env/host).
+rerun_last() {
+    if [ ! -f "$HISTORY_FILE" ] || [ "$(jq 'length' "$HISTORY_FILE" 2>/dev/null || echo 0)" -eq 0 ]; then
+        echo -e "${RED}Error:${NC} No run history."
+        exit 1
+    fi
+    local last_tag last_host
+    last_tag=$(jq -r '.[-1].tag // empty' "$HISTORY_FILE")
+    last_host=$(jq -r '.[-1].host // empty' "$HISTORY_FILE")
+    if [ -z "$last_tag" ]; then
+        echo -e "${RED}Error:${NC} No run history."
+        exit 1
+    fi
+    echo -e "${CYAN}Re-running:${NC} $last_tag${last_host:+ @$last_host}"
+    if [ -n "$last_host" ]; then
+        run_command "$last_tag" "@$last_host"
+    else
+        run_command "$last_tag"
+    fi
+}
+
+# ----------------------------------------------------------------------------
+# Section 8d: Findings & Reporting
+# Structured findings (severity/host/title/evidence) and a markdown report
+# that bundles hosts, findings, notes, and recent history.
+# ----------------------------------------------------------------------------
+
+# Record a finding. Severity must be critical/high/medium/low/info.
+add_finding() {
+    local severity="$1" host="$2" title="$3"
+    if [ -z "$severity" ] || [ -z "$title" ]; then
+        echo -e "${RED}Error:${NC} Usage: cmdr --finding <severity> <host> \"title\" [--evidence path]"
+        echo -e "Severity: critical | high | medium | low | info  (use '-' for no host)"
+        exit 1
+    fi
+    severity=$(echo "$severity" | tr '[:upper:]' '[:lower:]')
+    case "$severity" in
+        critical|high|medium|low|info) ;;
+        *) echo -e "${RED}Error:${NC} Severity must be critical/high/medium/low/info."; exit 1 ;;
+    esac
+    [ "$host" = "-" ] && host=""
+
+    [ ! -f "$FINDINGS_FILE" ] && echo "[]" > "$FINDINGS_FILE"
+    local ts
+    ts=$(date +"%Y-%m-%d %T")
+    local tmp_file
+    tmp_file=$(_mktemp_beside "$FINDINGS_FILE")
+    jq --arg sev "$severity" --arg host "$host" --arg title "$title" \
+       --arg ev "$CMDR_EVIDENCE" --arg ts "$ts" \
+       '. + [{severity:$sev, host:$host, title:$title, evidence:$ev, timestamp:$ts}]' \
+       "$FINDINGS_FILE" > "$tmp_file" && mv "$tmp_file" "$FINDINGS_FILE"
+
+    log_event "INFO" "Finding added: [$severity] $title"
+    echo -e "${GREEN}Finding recorded:${NC} [${severity}] $title"
+}
+
+# List findings, ordered by severity (critical first).
+list_findings() {
+    if [ ! -f "$FINDINGS_FILE" ] || [ "$(jq 'length' "$FINDINGS_FILE" 2>/dev/null || echo 0)" -eq 0 ]; then
+        echo -e "${YELLOW}No findings.${NC}"
+        return 0
+    fi
+    echo -e "${BOLD}${YELLOW}Findings:${NC}"
+    if [ "$ACTIVE_WORKSPACE" != "default" ]; then
+        echo -e "${CYAN}Workspace: $ACTIVE_WORKSPACE${NC}"
+    fi
+    echo ""
+    jq -r '
+        def rank: {"critical":0,"high":1,"medium":2,"low":3,"info":4}[.severity] // 5;
+        sort_by(rank) | .[]
+        | [.severity, (.host // ""), .title, (.evidence // ""), .timestamp] | join("\u001f")' "$FINDINGS_FILE" \
+        | while IFS=$'\037' read -r sev host title ev ts; do
+            local color="$CYAN"
+            case "$sev" in
+                critical|high) color="$RED" ;;
+                medium) color="$YELLOW" ;;
+                low|info) color="$GREEN" ;;
+            esac
+            printf "  ${color}%-9s${NC} %-14s %s\n" "[$sev]" "${host:-—}" "$title"
+            [ -n "$ev" ] && printf "            ${CYAN}evidence:${NC} %s\n" "$ev"
+        done
+}
+
+# Generate a markdown engagement report. Writes to $1 if given, else stdout.
+generate_report() {
+    local out="${1:-}"
+    local ts
+    ts=$(date +"%Y-%m-%d %T")
+
+    _report_body() {
+        echo "# Engagement Report — ${ACTIVE_WORKSPACE}"
+        echo ""
+        echo "_Generated: ${ts}_"
+        echo ""
+
+        echo "## Hosts"
+        echo ""
+        if [ -f "$HOSTS_FILE" ] && [ "$(jq 'length' "$HOSTS_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+            echo "| Name | IP | Hostname | OS | User |"
+            echo "|------|----|----------|----|------|"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.ip // "") | \(.value.hostname // "") | \(.value.os // "") | \(.value.user // "") |"' "$HOSTS_FILE"
+        else
+            echo "_None recorded._"
+        fi
+        echo ""
+
+        echo "## Findings"
+        echo ""
+        if [ -f "$FINDINGS_FILE" ] && [ "$(jq 'length' "$FINDINGS_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+            jq -r '
+                def rank: {"critical":0,"high":1,"medium":2,"low":3,"info":4}[.severity] // 5;
+                sort_by(rank) | .[]
+                | "### [\(.severity | ascii_upcase)] \(.title)\n\n"
+                  + "- Host: \(if (.host // "") == "" then "—" else .host end)\n"
+                  + "- Time: \(.timestamp)\n"
+                  + (if (.evidence // "") == "" then "" else "- Evidence: `\(.evidence)`\n" end)' "$FINDINGS_FILE"
+        else
+            echo "_None recorded._"
+        fi
+        echo ""
+
+        echo "## Notes"
+        echo ""
+        if [ -f "$NOTES_FILE" ] && [ "$(jq 'length' "$NOTES_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+            jq -r 'to_entries[] | "### \(.key)\n\n" + (.value | map("- [\(.timestamp)] \(.note)") | join("\n")) + "\n"' "$NOTES_FILE"
+        else
+            echo "_None recorded._"
+        fi
+        echo ""
+
+        echo "## Recent Command History"
+        echo ""
+        if [ -f "$HISTORY_FILE" ] && [ "$(jq 'length' "$HISTORY_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+            echo "| Time | Exit | Tag | Host | Command |"
+            echo "|------|------|-----|------|---------|"
+            jq -r '.[-30:] | reverse | .[] | "| \(.timestamp) | \(.exit) | \(.tag) | \(.host // "") | `\(.command)` |"' "$HISTORY_FILE"
+        else
+            echo "_None recorded._"
+        fi
+    }
+
+    if [ -n "$out" ]; then
+        _report_body > "$out"
+        log_event "INFO" "Report written to $out"
+        echo -e "${GREEN}Report written to:${NC} $out"
+    else
+        _report_body
+    fi
+}
+
+# ----------------------------------------------------------------------------
+# Section 8e: Fuzzy Picker
+# fzf-driven command selector. Falls back to interactive mode without fzf.
+# ----------------------------------------------------------------------------
+
+pick_command() {
+    if ! command -v fzf >/dev/null 2>&1; then
+        echo -e "${YELLOW}fzf not found.${NC} Falling back to interactive mode."
+        interactive_mode
+        return $?
+    fi
+
+    notify_untrusted_local
+    local effective
+    effective=$(get_effective_commands)
+
+    if [ "$(echo "$effective" | jq 'length' 2>/dev/null || echo 0)" -eq 0 ]; then
+        echo -e "${YELLOW}No commands available.${NC}"
+        return 0
+    fi
+
+    local sel
+    sel=$(echo "$effective" \
+        | jq -r 'to_entries[] | "\(.key)\t\(.value.command)\t\(.value.description // "")"' \
+        | fzf --delimiter='\t' --with-nth=1,3 \
+              --preview 'echo {2}' --preview-window=down,3,wrap \
+              --prompt='cmdr> ' --height=60%)
+    [ -z "$sel" ] && return 0
+
+    local tag
+    tag=$(printf '%s' "$sel" | cut -f1)
+    [ -n "$tag" ] && run_command "$tag"
+}
+
+# ----------------------------------------------------------------------------
+# Section 8f: Encrypted Workspaces
+# Encrypt a named workspace's directory to a single blob at rest (age or gpg).
+# ----------------------------------------------------------------------------
+
+# True if an encryption backend is available.
+_have_crypto() {
+    command -v age >/dev/null 2>&1 || command -v gpg >/dev/null 2>&1
+}
+
+# Encrypt stdin to file $1 (prompts for passphrase).
+_encrypt_stdin_to() {
+    if command -v age >/dev/null 2>&1; then
+        age -p -o "$1"
+    elif command -v gpg >/dev/null 2>&1; then
+        gpg --batch --yes -c -o "$1"
+    else
+        return 1
+    fi
+}
+
+# Decrypt file $1 to stdout (prompts for passphrase).
+_decrypt_to_stdout() {
+    if command -v age >/dev/null 2>&1; then
+        age -d "$1"
+    elif command -v gpg >/dev/null 2>&1; then
+        gpg -d "$1"
+    else
+        return 1
+    fi
+}
+
+# Encrypt a named workspace dir into <name>.cmdrlock and remove the plaintext.
+lock_workspace() {
+    local name="${1:-$ACTIVE_WORKSPACE}"
+    if [ "$name" = "default" ]; then
+        echo -e "${RED}Error:${NC} The default workspace cannot be locked. Use a named workspace."
+        exit 1
+    fi
+    name=$(sanitize_tag "$name") || exit 1
+    if ! _have_crypto; then
+        echo -e "${RED}Error:${NC} Need 'age' or 'gpg' installed to encrypt."
+        exit 1
+    fi
+
+    local ws_dir="$DATA_DIR/workspaces/$name"
+    local blob="$DATA_DIR/workspaces/${name}.cmdrlock"
+    if [ ! -d "$ws_dir" ]; then
+        echo -e "${RED}Error:${NC} Workspace '$name' not found."
+        exit 1
+    fi
+    if [ -f "$blob" ]; then
+        echo -e "${RED}Error:${NC} An encrypted blob for '$name' already exists."
+        exit 1
+    fi
+
+    echo -e "${CYAN}Encrypting workspace '$name'...${NC}"
+    if tar -czf - -C "$DATA_DIR/workspaces" "$name" | _encrypt_stdin_to "$blob"; then
+        rm -rf "$ws_dir"
+        # If we just locked the active workspace, drop back to default.
+        [ "$name" = "$ACTIVE_WORKSPACE" ] && rm -f "$WORKSPACE_FILE"
+        log_event "INFO" "Locked workspace: $name"
+        echo -e "${GREEN}Workspace locked:${NC} $blob"
+    else
+        rm -f "$blob"
+        echo -e "${RED}Error:${NC} Encryption failed."
+        exit 1
+    fi
+}
+
+# Decrypt <name>.cmdrlock back into a workspace directory.
+unlock_workspace() {
+    local name="$1"
+    if [ -z "$name" ]; then
+        echo -e "${RED}Error:${NC} Usage: cmdr --unlock-workspace <name>"
+        exit 1
+    fi
+    name=$(sanitize_tag "$name") || exit 1
+
+    local ws_dir="$DATA_DIR/workspaces/$name"
+    local blob="$DATA_DIR/workspaces/${name}.cmdrlock"
+    if [ ! -f "$blob" ]; then
+        echo -e "${RED}Error:${NC} No encrypted blob for '$name'."
+        exit 1
+    fi
+    if [ -d "$ws_dir" ]; then
+        echo -e "${RED}Error:${NC} Plaintext workspace '$name' already exists."
+        exit 1
+    fi
+
+    echo -e "${CYAN}Decrypting workspace '$name'...${NC}"
+    if _decrypt_to_stdout "$blob" | tar -xzf - -C "$DATA_DIR/workspaces"; then
+        rm -f "$blob"
+        log_event "INFO" "Unlocked workspace: $name"
+        echo -e "${GREEN}Workspace unlocked:${NC} $name"
+    else
+        rm -rf "$ws_dir"
+        echo -e "${RED}Error:${NC} Decryption failed (wrong passphrase?)."
+        exit 1
+    fi
+}
+
+# ----------------------------------------------------------------------------
 # Section 9: Playbooks
 # Named sequences of tags executed in order. Stored in .cmdr_playbooks.json.
 # ----------------------------------------------------------------------------
@@ -925,7 +1653,7 @@ create_playbook() {
     tags_json=$(printf '%s\n' "${tags[@]}" | jq -R . | jq -s .)
 
     local tmp_file
-    tmp_file=$(mktemp /tmp/cmdr.XXXXXX.json)
+    tmp_file=$(_mktemp_beside "$PLAYBOOKS_FILE")
     jq --arg name "$name" --argjson tags "$tags_json" \
         '. + {($name): $tags}' "$PLAYBOOKS_FILE" > "$tmp_file"
     mv "$tmp_file" "$PLAYBOOKS_FILE"
@@ -954,8 +1682,9 @@ run_playbook() {
     echo -e "${BOLD}${GREEN}Running playbook: $name${NC}"
     echo ""
 
-    local tags_array
-    mapfile -t tags_array < <(jq -r --arg name "$name" '.[$name][]' "$PLAYBOOKS_FILE")
+    local tags_array=()
+    while IFS= read -r _t; do tags_array+=("$_t"); done \
+        < <(jq -r --arg name "$name" '.[$name][]' "$PLAYBOOKS_FILE")
 
     local step=1
     for tag in "${tags_array[@]}"; do
@@ -1020,7 +1749,7 @@ add_note() {
     timestamp=$(date +"%Y-%m-%d %T")
 
     local tmp_file
-    tmp_file=$(mktemp /tmp/cmdr.XXXXXX.json)
+    tmp_file=$(_mktemp_beside "$NOTES_FILE")
     jq --arg tag "$tag" --arg note "$note_text" --arg ts "$timestamp" \
         '.[$tag] = ((.[$tag] // []) + [{timestamp: $ts, note: $note}])' \
         "$NOTES_FILE" > "$tmp_file"
@@ -1189,7 +1918,7 @@ install_commands() {
     backup_commands "$WRITE_COMMANDS_FILE"
 
     local tmp_file
-    tmp_file=$(mktemp /tmp/cmdr.XXXXXX.json)
+    tmp_file=$(_mktemp_beside "$WRITE_COMMANDS_FILE")
     if ! echo "$validated_json" | jq -s '.[0] * .[1]' "$WRITE_COMMANDS_FILE" - > "$tmp_file" 2>/dev/null; then
         log_event "ERROR" "Failed to merge commands"
         echo -e "${RED}Error:${NC} Failed to merge commands."
@@ -1197,6 +1926,7 @@ install_commands() {
         exit 1
     fi
     mv "$tmp_file" "$WRITE_COMMANDS_FILE"
+    [ "$USE_LOCAL" = true ] && _retrust_local
 
     log_event "INFO" "Installed $imported commands from: $input_file ($skipped skipped)"
     echo -e "${GREEN}Imported $imported commands${NC} ($skipped skipped)."
@@ -1250,6 +1980,7 @@ load_pack() {
 
 interactive_mode() {
     log_event "INFO" "Entered interactive mode"
+    notify_untrusted_local
     echo -e "${BOLD}${YELLOW}CMDR Interactive Mode${NC} (select 'exit' to quit)"
     if [ "$ACTIVE_WORKSPACE" != "default" ]; then
         echo -e "${CYAN}Workspace: $ACTIVE_WORKSPACE${NC}"
@@ -1258,8 +1989,9 @@ interactive_mode() {
     while true; do
         local effective
         effective=$(get_effective_commands)
-        local cat_array
-        mapfile -t cat_array < <(echo "$effective" | jq -r '[to_entries[] | .value.category] | unique[]' 2>/dev/null)
+        local cat_array=()
+        while IFS= read -r _c; do cat_array+=("$_c"); done \
+            < <(echo "$effective" | jq -r '[to_entries[] | .value.category] | unique[]' 2>/dev/null)
         if [ "${#cat_array[@]}" -eq 0 ]; then
             echo -e "${YELLOW}No commands available.${NC}"
             return 0
@@ -1274,9 +2006,10 @@ interactive_mode() {
             fi
             if [ -n "$category" ]; then
                 echo -e "\n${GREEN}Commands in '$category':${NC}"
-                local cmd_array
-                mapfile -t cmd_array < <(echo "$effective" | jq -r --arg cat "$category" \
-                    'to_entries[] | select(.value.category == $cat) | .key')
+                local cmd_array=()
+                while IFS= read -r _k; do cmd_array+=("$_k"); done \
+                    < <(echo "$effective" | jq -r --arg cat "$category" \
+                        'to_entries[] | select(.value.category == $cat) | .key')
                 if [ "${#cmd_array[@]}" -eq 0 ]; then
                     echo -e "${YELLOW}No commands in '$category'.${NC}"
                     break
@@ -1349,19 +2082,28 @@ display_subcommand_help() {
             echo "Includes workspace and project-local commands."
             ;;
         run)
-            echo "Usage: cmdr -r <tag> [arg1 arg2 ...] [--save]"
+            echo "Usage: cmdr -r <tag|!|last> [arg1 arg2 ...] [@host] [options]"
             echo ""
             echo "Run a stored command. Extra args fill {placeholder} parameters."
             echo "Environment variables ({KEY}) are substituted first."
+            echo "Placeholder forms: {VAR}, {VAR:=default}, {VAR:?} (required)."
+            echo "Use '!' or 'last' to re-run the most recent command."
             echo ""
-            echo "  --save         Save output to outputs/ directory"
-            echo "  -n, --dry-run  Print command without executing"
+            echo "  --save           Save output to outputs/ directory"
+            echo "  --capture VAR    Store stdout into env {VAR} (or VAR:regex)"
+            echo "  @host            Fill {TARGET}/{RHOST}/{OS}/{RUSER}/{RPORT} from a host"
+            echo "  --on <host>      Execute the command on <host> over SSH"
+            echo "  --all-hosts      Run once per defined host"
+            echo "  -n, --dry-run    Print command without executing"
+            echo "  --               End of options: pass following tokens as literal args"
             echo ""
             echo "Examples:"
-            echo "  cmdr -r serve"
             echo "  cmdr -r scan 192.168.1.1"
-            echo "  cmdr -r scan --save"
-            echo "  cmdr -n -r scan 10.0.0.1"
+            echo "  cmdr -r scan @dc01 --save"
+            echo "  cmdr -r get-token --capture TOKEN:'eyJ[A-Za-z0-9._-]+'"
+            echo "  cmdr -r linpeas --on dc01"
+            echo "  cmdr -r nmap --all-hosts"
+            echo "  cmdr -r last"
             ;;
         search)
             echo "Usage: cmdr -f <keyword>"
@@ -1433,6 +2175,30 @@ display_subcommand_help() {
             echo ""
             echo "Packs are pre-built command sets for CTF, development, etc."
             ;;
+        host)
+            echo "Usage: cmdr --host add <ip> --name <name> [--hostname h] [--os o] [--user u] [--port p]"
+            echo "       cmdr --host list"
+            echo "       cmdr --host rm <name>"
+            echo ""
+            echo "Hosts populate {TARGET}/{RHOST}/{RHOSTNAME}/{OS}/{RUSER}/{RPORT} when a"
+            echo "command runs against them via '@name', '--on name', or '--all-hosts'."
+            echo ""
+            echo "Examples:"
+            echo "  cmdr --host add 10.10.10.5 --name dc01 --os windows --user admin"
+            echo "  cmdr -r winrm @dc01"
+            echo "  cmdr -r nmap --all-hosts"
+            ;;
+        finding)
+            echo "Usage: cmdr --finding <severity> <host> \"title\" [--evidence path]"
+            echo "       cmdr --findings            List findings"
+            echo "       cmdr --report [file]       Render a markdown engagement report"
+            echo ""
+            echo "Severity: critical | high | medium | low | info   (use '-' for no host)"
+            echo ""
+            echo "Examples:"
+            echo "  cmdr --finding high dc01 \"Unauth WinRM\" --evidence outputs/winrm_x.log"
+            echo "  cmdr --report engagement.md"
+            ;;
     esac
 }
 
@@ -1450,13 +2216,20 @@ display_help() {
     echo -e "${YELLOW}Usage:${NC} cmdr [options]"
     echo ""
     echo -e "${YELLOW}Command Management:${NC}"
-    echo "  -a <tag> <cmd> [cat] [--desc ..] [--alias ..]  Add a command"
-    echo "  -e <tag> [cmd] [cat] [--desc ..] [--alias ..]  Edit a command"
+    echo "  -a <tag> <cmd> [cat] [--desc ..] [--alias ..] [--danger]  Add a command"
+    echo "  -e <tag> [cmd] [cat] [--desc ..] [--alias ..] [--danger]  Edit a command"
     echo "  -d <tag> [-y]                                  Delete a command"
     echo "  -s                                             Show all commands"
-    echo "  -r <tag> [args...] [--save]                    Run a command"
+    echo "  -r <tag|!|last> [args...] [@host] [opts]        Run a command"
     echo "  -f <keyword>                                   Search commands"
     echo "  -c <tag> [args...]                             Copy command to clipboard"
+    echo "  --pick                                         Fuzzy-pick a command (fzf)"
+    echo ""
+    echo -e "${YELLOW}Run Options (with -r):${NC}"
+    echo "  --save                 Save output to outputs/"
+    echo "  --capture VAR[:regex]  Store stdout into env {VAR}"
+    echo "  @host / --on <host>    Target a host (fill vars / run over SSH)"
+    echo "  --all-hosts            Run once per defined host"
     echo ""
     echo -e "${YELLOW}Workspaces & Environment:${NC}"
     echo "  -w <name>              Switch workspace"
@@ -1466,6 +2239,15 @@ display_help() {
     echo "  --env                  Show environment variables"
     echo "  --env-clear KEY        Clear environment variable"
     echo "  --local                Use project-local .cmdr.json"
+    echo "  --trust                Trust the current dir's .cmdr.json"
+    echo "  --untrust              Revoke trust for the current dir's .cmdr.json"
+    echo "  --lock-workspace [n]   Encrypt a named workspace at rest (age/gpg)"
+    echo "  --unlock-workspace <n> Decrypt a locked workspace"
+    echo ""
+    echo -e "${YELLOW}Hosts:${NC}"
+    echo "  --host add <ip> --name <n> [--os ..] [--user ..] [--port ..]"
+    echo "  --host list            List hosts"
+    echo "  --host rm <name>       Remove a host"
     echo ""
     echo -e "${YELLOW}Playbooks & Chains:${NC}"
     echo "  --chain <tags...>                  Run commands in sequence"
@@ -1473,10 +2255,14 @@ display_help() {
     echo "  -p <name>                          Run a playbook"
     echo "  --playbooks                        List playbooks"
     echo ""
-    echo -e "${YELLOW}Notes & Outputs:${NC}"
-    echo "  --note <tag> \"text\"     Add a note/finding"
-    echo "  --notes [tag]           Show notes"
-    echo "  --outputs [tag]         Show saved outputs"
+    echo -e "${YELLOW}Notes, Findings & History:${NC}"
+    echo "  --note <tag> \"text\"               Add a note"
+    echo "  --notes [tag]                      Show notes"
+    echo "  --outputs [tag]                    Show saved outputs"
+    echo "  --finding <sev> <host> \"title\"     Record a finding"
+    echo "  --findings                         List findings"
+    echo "  --report [file]                    Markdown engagement report"
+    echo "  --history [n]                      Show recent run history"
     echo ""
     echo -e "${YELLOW}Import/Export & Packs:${NC}"
     echo "  -x <file>              Export commands to JSON"
@@ -1495,14 +2281,11 @@ display_help() {
     echo ""
     echo -e "${YELLOW}Examples:${NC}"
     echo "  cmdr -a scan 'nmap {TARGET} -sV' security --desc 'Service scan'"
-    echo "  cmdr --env TARGET=10.10.10.1"
-    echo "  cmdr -r scan"
-    echo "  cmdr -r scan --save"
-    echo "  cmdr -c scan"
-    echo "  cmdr --note scan 'Found port 8080 open, Tomcat'"
-    echo "  cmdr -w htb-box && cmdr --pack load ctf-network"
-    echo "  cmdr --playbook recon quick-scan dirfuzz nikto-scan"
-    echo "  cmdr -p recon"
-    echo "  cmdr --local -a build 'make -j4' dev"
+    echo "  cmdr --host add 10.10.10.5 --name dc01 --os windows"
+    echo "  cmdr -r scan @dc01 --save"
+    echo "  cmdr -r get-token --capture TOKEN && cmdr -r whoami-api"
+    echo "  cmdr -r linpeas --on dc01"
+    echo "  cmdr --finding high dc01 'Unauth WinRM' && cmdr --report report.md"
+    echo "  cmdr -p recon   # cmdr -r last   # cmdr --history"
     echo ""
 }

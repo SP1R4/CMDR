@@ -34,6 +34,7 @@ _cmdr_completions() {
 
     local commands_file="${active_data_dir:+$active_data_dir/}my_commands.json"
     local playbooks_file="${active_data_dir:+$active_data_dir/}.cmdr_playbooks.json"
+    local hosts_file="${active_data_dir:+$active_data_dir/}.cmdr_hosts.json"
     local packs_dir="${data_dir:+$data_dir/}packs"
 
     # Helper: complete with tag names and aliases
@@ -46,9 +47,39 @@ _cmdr_completions() {
         fi
     }
 
+    # Helper: complete with host names
+    _cmdr_complete_hosts() {
+        if [ -f "$hosts_file" ]; then
+            local hosts
+            hosts=$(jq -r 'keys[]' "$hosts_file" 2>/dev/null)
+            COMPREPLY=( $(compgen -W "$hosts" -- "$cur") )
+        fi
+    }
+
     case "$prev" in
         -r|-d|-e|-c)
             _cmdr_complete_tags
+            return ;;
+        --on|rm|del)
+            _cmdr_complete_hosts
+            return ;;
+        --host)
+            COMPREPLY=( $(compgen -W "add list rm" -- "$cur") )
+            return ;;
+        --unlock-workspace)
+            # Complete with locked (encrypted) workspace names
+            if [ -d "$data_dir/workspaces" ]; then
+                local locked
+                locked=$(ls "$data_dir/workspaces"/*.cmdrlock 2>/dev/null | xargs -I{} basename {} .cmdrlock)
+                COMPREPLY=( $(compgen -W "$locked" -- "$cur") )
+            fi
+            return ;;
+        --lock-workspace)
+            local wsnames=""
+            [ -d "$data_dir/workspaces" ] && wsnames=$(find "$data_dir/workspaces" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null)
+            COMPREPLY=( $(compgen -W "$wsnames" -- "$cur") )
+            return ;;
+        --capture|--evidence|--name|--hostname|--os|--user|--port)
             return ;;
         -f)
             # Complete with categories
@@ -104,9 +135,13 @@ _cmdr_completions() {
             -a -e -d -s -r -f -c -x -l -i -m -p
             -w -W -u -n -v -V -h
             --help --version --undo --dry-run --local --save
+            --trust --untrust --pick --danger
+            --capture --on --all-hosts
             --desc --alias --env --env-clear
             --chain --playbook --playbooks
             --note --notes --outputs --pack
+            --host --finding --findings --report --history
+            --lock-workspace --unlock-workspace
         " -- "$cur") )
         return
     fi
