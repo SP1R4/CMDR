@@ -35,6 +35,8 @@ _cmdr_completions() {
     local commands_file="${active_data_dir:+$active_data_dir/}my_commands.json"
     local playbooks_file="${active_data_dir:+$active_data_dir/}.cmdr_playbooks.json"
     local hosts_file="${active_data_dir:+$active_data_dir/}.cmdr_hosts.json"
+    local workflows_file="${active_data_dir:+$active_data_dir/}.cmdr_workflows.json"
+    local secrets_file="${active_data_dir:+$active_data_dir/}.cmdr_secrets.json"
     local packs_dir="${data_dir:+$data_dir/}packs"
 
     # Helper: complete with tag names and aliases
@@ -56,6 +58,14 @@ _cmdr_completions() {
         fi
     }
 
+    # @host targeting: complete host names with the @ prefix preserved.
+    if [[ "$cur" == @* ]] && [ -f "$hosts_file" ]; then
+        local hn
+        hn=$(jq -r 'keys[]' "$hosts_file" 2>/dev/null)
+        COMPREPLY=( $(compgen -P @ -W "$hn" -- "${cur#@}") )
+        return
+    fi
+
     case "$prev" in
         -r|-d|-e|-c)
             _cmdr_complete_tags
@@ -65,6 +75,32 @@ _cmdr_completions() {
             return ;;
         --host)
             COMPREPLY=( $(compgen -W "add list rm" -- "$cur") )
+            return ;;
+        --flow)
+            COMPREPLY=( $(compgen -W "run list import show" -- "$cur") )
+            return ;;
+        run|show)
+            # After `--flow run|show`, complete stored workflow names
+            if [ -f "$workflows_file" ]; then
+                local wfn
+                wfn=$(jq -r 'keys[]' "$workflows_file" 2>/dev/null)
+                COMPREPLY=( $(compgen -W "$wfn" -- "$cur") )
+            fi
+            return ;;
+        import)
+            COMPREPLY=( $(compgen -f -- "$cur") )
+            return ;;
+        --secret-clear)
+            if [ -f "$secrets_file" ]; then
+                local sn
+                sn=$(jq -r 'keys[]' "$secrets_file" 2>/dev/null)
+                COMPREPLY=( $(compgen -W "$sn" -- "$cur") )
+            fi
+            return ;;
+        --format)
+            COMPREPLY=( $(compgen -W "md csv html pdf" -- "$cur") )
+            return ;;
+        --sync-remote|--secret|--secrets|--lint|--sync)
             return ;;
         --unlock-workspace)
             # Complete with locked (encrypted) workspace names
@@ -140,8 +176,9 @@ _cmdr_completions() {
             --desc --alias --env --env-clear
             --chain --playbook --playbooks
             --note --notes --outputs --pack
-            --host --finding --findings --report --history
+            --host --finding --findings --report --format --history
             --lock-workspace --unlock-workspace
+            --flow --secret --secrets --secret-clear --lint --sync --sync-remote
         " -- "$cur") )
         return
     fi

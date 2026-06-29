@@ -1,6 +1,6 @@
 <div align="center">
 
-# CMDR v3.1
+# CMDR v3.2
 
 [![CI](https://github.com/SP1R4/CMDR/actions/workflows/ci.yml/badge.svg)](https://github.com/SP1R4/CMDR/actions/workflows/ci.yml) ![License](https://img.shields.io/github/license/SP1R4/CMDR?color=black) ![Top language](https://img.shields.io/github/languages/top/SP1R4/CMDR) ![Last commit](https://img.shields.io/github/last-commit/SP1R4/CMDR)
 
@@ -20,6 +20,11 @@ variables, playbooks, output capture, findings, and extensible command packs.
 | Feature | Description |
 |---------|-------------|
 | **Command Management** | Store, tag, search, alias, and run commands instantly |
+| **Workflow Engine** | Conditional, capturing, retrying, parallel multi-step workflows (`--flow`) |
+| **Secrets** | `{NAME}` resolved from `pass`/`cmd`/`env`/`age`/`file` at run time, kept out of history |
+| **Lint** | `--lint` validates stores, packs, and workflows |
+| **Reports** | Markdown / CSV / HTML / PDF engagement reports |
+| **Git Sync** | Version/share the data dir (`--sync`) |
 | **Parameterized Commands** | `nmap {TARGET} -sV`; `{VAR:=default}` and `{VAR:?}` (required) forms |
 | **Host/Target Model** | Inventory hosts; `@name` / `--on` / `--all-hosts` fill `{TARGET}` etc. |
 | **Output Capture → Chaining** | `--capture VAR[:regex]` pipes a command's stdout into an env var |
@@ -355,6 +360,94 @@ cmdr --pick      # fuzzy-find a command with fzf and run it
 cmdr             # bare invocation on a TTY also opens the picker (falls back to -m)
 ```
 
+## Workflows
+
+Workflows are JSON files describing conditional, multi-step runs — the step up
+from linear playbooks. Each step runs a stored command and can capture output,
+gate on a condition, retry, time out, run remotely, or run a `parallel` block.
+
+```json
+{
+  "name": "recon",
+  "steps": [
+    { "run": "quick-scan", "args": ["@dc01"], "register": "scan",
+      "capture": { "OPEN_PORTS": "[0-9]+(?:,[0-9]+)*" } },
+    { "run": "smb-enum",  "when": "env:OPEN_PORTS contains 445" },
+    { "run": "exploit",   "when": "step:scan.exit == 0", "retry": 2, "timeout": 60,
+      "continue_on_error": true },
+    { "parallel": [ { "run": "dirfuzz" }, { "run": "nikto" } ] }
+  ]
+}
+```
+
+```bash
+cmdr --flow import recon.json     # store it by name
+cmdr --flow run recon             # run stored, or: cmdr --flow run ./recon.json
+cmdr -n --flow run recon          # dry-run: show the steps and which would skip
+cmdr --flow list                  # list stored workflows
+```
+
+**Step fields:** `run`, `args` (incl. `@host`), `when`, `capture` (`{VAR:"regex"}`,
+empty regex = whole output), `register` (id for conditions), `retry`, `timeout`
+(needs `timeout`/`gtimeout`), `remote: true` (SSH via the step's `@host`),
+`continue_on_error`. A `{ "parallel": [ ... ] }` block runs its substeps
+concurrently.
+
+**Conditions (`when`)** — a small, shell-injection-safe DSL:
+`env:NAME`, `step:ID.exit`, `step:ID.stdout`, or a bare `NAME` (= env) on the
+left; operators `==`, `!=`, `contains`, `matches` (regex), or `NAME exists`;
+join clauses with `&&` or `||`; negate a clause with a leading `!`.
+
+## Secrets
+
+Map a `{NAME}` placeholder to a secret source. The value is fetched **only at
+execution time**, so it never lands in the stored command, the run history, the
+logs, or the on-screen "Running" line — those keep the `{NAME}` token.
+
+```bash
+cmdr --secret DBPASS pass:work/db          # from `pass`
+cmdr --secret TOKEN  cmd:'vault read -field=t secret/x'
+cmdr --secret KEY    env:MY_ENV_VAR        # from the environment
+cmdr --secret PW     age:~/.secrets/pw.age # age-encrypted file
+cmdr --secrets                             # list (sources only, never values)
+cmdr -a dbq 'psql "host={TARGET} password={DBPASS}"' db
+cmdr -r dbq @prod                          # {DBPASS} filled only for the child process
+```
+
+Providers: `pass` · `cmd` · `env` · `age` · `file`. `cmdr -c` (clipboard) *does*
+resolve secrets, since copied commands are meant to be pasted and run.
+
+## Lint
+
+```bash
+cmdr --lint     # validate command stores, packs, and workflows
+```
+Flags invalid JSON, empty commands, bad tag names, unbalanced `{ }` placeholders,
+and workflow steps that reference unknown commands. Exits non-zero on problems —
+handy in CI or a pre-commit hook.
+
+## Reports
+
+```bash
+cmdr --report engagement.md      # markdown (default)
+cmdr --report findings.csv       # CSV of findings
+cmdr --report report.html        # HTML (needs pandoc)
+cmdr --report report.pdf         # PDF (needs pandoc + a LaTeX engine)
+cmdr --report out.txt --format csv
+```
+Format is inferred from the extension, or forced with `--format md|csv|html|pdf`.
+
+## Sync
+
+Version and share the data dir (commands, hosts, findings, workflows, …) via git:
+
+```bash
+cmdr --sync-remote git@github.com:you/engagements.git
+cmdr --sync "after box1 recon"
+```
+Sync refuses to run when the data dir is the CMDR install directory — point
+`CMDR_DATA_DIR` at a separate folder first.
+
 ## Command Reference
 
 ### Core Commands
@@ -400,8 +493,20 @@ cmdr             # bare invocation on a TTY also opens the picker (falls back to
 |------|-------|-------------|
 | `--finding` | `cmdr --finding <sev> <host> "title" [--evidence path]` | Record a finding |
 | `--findings` | `cmdr --findings` | List findings |
-| `--report` | `cmdr --report [file]` | Render a markdown report |
+| `--report` | `cmdr --report [file] [--format md\|csv\|html\|pdf]` | Render a report |
 | `--history` | `cmdr --history [n]` | Show recent run history |
+
+### Workflows, Secrets & Maintenance
+
+| Flag | Usage | Description |
+|------|-------|-------------|
+| `--flow` | `cmdr --flow run\|import\|list\|show ...` | Manage/run workflows |
+| `--secret` | `cmdr --secret NAME provider:ref` | Register a runtime secret |
+| `--secrets` | `cmdr --secrets` | List secrets (sources only) |
+| `--secret-clear` | `cmdr --secret-clear NAME` | Remove a secret |
+| `--lint` | `cmdr --lint` | Validate stores, packs, workflows |
+| `--sync` | `cmdr --sync [msg]` | Commit/push the data dir |
+| `--sync-remote` | `cmdr --sync-remote <url>` | Set the sync git remote |
 
 ### Playbooks & Chains
 
