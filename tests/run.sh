@@ -5,6 +5,7 @@
 # Optional (feature paths degrade gracefully if absent): age/gpg, fzf, ssh.
 # ============================================================================
 set -u
+exec </dev/null   # no test should ever block on an interactive prompt
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 C="$ROOT/cmdr.sh"

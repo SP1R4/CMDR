@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workspace names are sanitized to prevent path traversal.
 - macOS Bash 3.2 compatibility (removed `mapfile` usage).
 - Display columns no longer misalign when optional fields are empty.
+- Dry-run (`-n`) never prompts for missing placeholders; it shows `<name>`
+  for the gap instead of blocking.
 
 ## [3.0.0]
 - Initial public release: command store with tags/aliases/categories,

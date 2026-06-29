@@ -392,6 +392,9 @@ resolve_command() {
         elif [ "$mod" = "required" ]; then
             echo -e "${RED}Error:${NC} Required value '{$name}' not provided." >&2
             return 1
+        elif [ "$DRY_RUN" = true ]; then
+            # Never block on a prompt during a dry run; show the gap instead.
+            value="<$name>"
         else
             read -p "Enter value for $name: " value
         fi
