@@ -1,6 +1,6 @@
 {
   "dirfuzz": {
-    "command": "ffuf -u http://{TARGET}:{PORT}/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,301,302,403",
+    "command": "ffuf -u http://{TARGET}:{PORT}/FUZZ -w {WORDLIST:=/usr/share/dirb/wordlists/common.txt} -mc 200,301,302,403",
     "category": "ctf-web",
     "description": "Directory/file fuzzing with ffuf",
     "aliases": ["fuzz"]
@@ -35,7 +35,7 @@
     "description": "Grab HTTP response headers"
   },
   "gobuster-dir": {
-    "command": "gobuster dir -u http://{TARGET}:{PORT} -w /usr/share/wordlists/dirb/common.txt -t 50",
+    "command": "gobuster dir -u http://{TARGET}:{PORT} -w {WORDLIST:=/usr/share/dirb/wordlists/common.txt} -t 50",
     "category": "ctf-web",
     "description": "Directory brute-force with gobuster",
     "aliases": ["gob"]

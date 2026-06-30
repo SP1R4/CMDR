@@ -37,7 +37,7 @@
     "command": "ss -tulnp 2>/dev/null || netstat -tulnp 2>/dev/null",
     "category": "ctf-privesc",
     "description": "List listening ports and connections",
-    "aliases": ["ports"]
+    "aliases": ["net-ports"]
   },
   "user-enum": {
     "command": "cat /etc/passwd | grep -v nologin | grep -v false | grep sh$",

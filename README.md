@@ -221,12 +221,35 @@ cmdr --pack load ctf-web      # Load a pack
 | Pack | Commands | Category |
 |------|----------|----------|
 | `starter` | handy sysadmin/network/dev/security one-liners | mixed |
+| `ctf-toolkit` | full companion set for [ctf-toolkit-setup](https://github.com/SP1R4/ctf-toolkit-setup) (ffuf, nuclei, httpx, feroxbuster, gdb/GEF, radare2, pwntools, john, hashcat, hydra, hashcracker, steghide, stegseek, zsteg, vol3, RsaCtfTool, [BackupHandler](https://github.com/SP1R4/BackupHandler), …) | tk-recon, tk-web, tk-pwn, tk-crypto, tk-forensics, tk-crack, tk-shell, tk-backup |
 | `ctf-network` | nmap scans, enum4linux, netcat, DNS | ctf-recon, ctf-enum, ctf-exploit |
 | `ctf-web` | ffuf, gobuster, sqlmap, nikto, wfuzz | ctf-web |
 | `ctf-privesc` | SUID, capabilities, cron, sudo, linpeas | ctf-privesc |
 | `dev-python` | venv, pytest, flake8, http.server | dev-python |
 | `dev-docker` | build, run, compose, prune, exec | dev-docker |
 | `dev-git` | log, undo, amend, stash, branch cleanup | dev-git |
+
+### Pairing with ctf-toolkit-setup
+
+[ctf-toolkit-setup](https://github.com/SP1R4/ctf-toolkit-setup) provisions a CTF
+box (Ubuntu/Debian) with a broad toolset — and installs CMDR as part of the run.
+Its installer also seeds the matching `ctf-toolkit` pack automatically, so every
+command lines up with an actually-installed binary:
+
+```bash
+# On a freshly provisioned box (toolkit does this for you):
+cmdr --pack load ctf-toolkit
+cmdr -s tk-          # browse the toolkit commands (tk-* tags)
+```
+
+Wordlist paths default to the toolkit's Ubuntu layout
+(`/usr/share/dirb/wordlists/`, `/usr/share/seclists/`, `/usr/share/wordlists/rockyou.txt`).
+Override per environment (e.g. Kali) without editing the pack:
+
+```bash
+cmdr --env WORDLIST=/usr/share/wordlists/dirb/common.txt
+cmdr --env ROCKYOU=/usr/share/wordlists/rockyou.txt
+```
 
 ## Notes & Output Capture
 

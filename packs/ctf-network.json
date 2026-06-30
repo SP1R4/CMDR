@@ -40,7 +40,7 @@
     "command": "nc -nlvp {LPORT}",
     "category": "ctf-exploit",
     "description": "Netcat reverse shell listener",
-    "aliases": ["listener", "nc-listen"]
+    "aliases": ["nc-listen", "revshell-listener"]
   },
   "http-upload-server": {
     "command": "python3 -c 'import http.server,socketserver;h=http.server.SimpleHTTPRequestHandler;h.do_PUT=lambda s:open(s.path[1:],\"wb\").write(s.rfile.read(int(s.headers[\"Content-Length\"]))) or s.send_response(201) or s.end_headers();socketserver.TCPServer((\"\",{LPORT}),h).serve_forever()'",
