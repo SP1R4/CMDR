@@ -2106,7 +2106,7 @@ install_commands() {
         | reduce (to_entries[]) as $e ({out: {}, claimed: {}, stripped: []};
             (reduce ($e.value.aliases // [])[] as $a
                 ({keep: [], claimed: .claimed, stripped: []};
-                    if ($tags | index($a)) != null then
+                    if (($tags | index($a)) != null and $a != $e.key) then
                         .stripped += [$e.key + " → " + $a + " (tag exists)"]
                     elif (.claimed[$a] != null) then
                         .stripped += [$e.key + " → " + $a + " (used by " + .claimed[$a] + ")"]
