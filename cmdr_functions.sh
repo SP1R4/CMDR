@@ -1728,10 +1728,21 @@ _imenu_read_key() {
     esac
 }
 
+# Terminal size from the controlling tty (works even when stdout is captured,
+# unlike `tput` which queries stdout). Echoes "rows" or "cols".
+_imenu_rows() {
+    local s; s=$(stty size </dev/tty 2>/dev/null); s="${s%% *}"
+    case "$s" in ''|*[!0-9]*) echo 24 ;; *) echo "$s" ;; esac
+}
+_imenu_cols() {
+    local s; s=$(stty size </dev/tty 2>/dev/null); s="${s##* }"
+    case "$s" in ''|*[!0-9]*) echo 80 ;; *) echo "$s" ;; esac
+}
+
 # Rows of the list to show at once (terminal height minus chrome).
 _imenu_vh() {
     local n="$1" lines vh
-    lines=$(tput lines 2>/dev/null || echo 24)
+    lines=$(_imenu_rows)
     vh=$(( lines > 8 ? lines - 6 : lines ))
     [ "$vh" -lt 1 ] && vh=1
     [ "$vh" -gt "$n" ] && vh="$n"
@@ -1745,7 +1756,8 @@ _imenu_bash_one() {
     while IFS=$'\t' read -r k l; do keys+=("$k"); labels+=("$l"); done
     local n=${#keys[@]}; [ "$n" -eq 0 ] && return 0
     local vh; vh=$(_imenu_vh "$n")
-    local cur=0 top=0 drawn=0 key row idx
+    local cur=0 top=0 drawn=0 key row idx disp
+    local maxw=$(( $(_imenu_cols) - 4 )); [ "$maxw" -lt 12 ] && maxw=12
     printf '\n%s  \033[2m(\xe2\x86\x91/\xe2\x86\x93 move \xc2\xb7 ENTER select \xc2\xb7 q cancel)\033[0m\n' "$prompt" >&2
     while true; do
         [ "$cur" -lt "$top" ] && top=$cur
@@ -1754,8 +1766,9 @@ _imenu_bash_one() {
         for ((row=0; row<vh; row++)); do
             idx=$((top + row))
             if [ "$idx" -lt "$n" ]; then
-                if [ "$idx" -eq "$cur" ]; then printf '\033[2K\033[36m> %s\033[0m\n' "${labels[$idx]}" >&2
-                else printf '\033[2K  %s\n' "${labels[$idx]}" >&2; fi
+                disp="${labels[$idx]}"; [ "${#disp}" -gt "$maxw" ] && disp="${disp:0:maxw}"
+                if [ "$idx" -eq "$cur" ]; then printf '\033[2K\033[36m> %s\033[0m\n' "$disp" >&2
+                else printf '\033[2K  %s\n' "$disp" >&2; fi
             else printf '\033[2K\n' >&2; fi
         done
         printf '\033[2K  \033[2m[%d/%d]\033[0m\n' "$((cur + 1))" "$n" >&2
@@ -1777,7 +1790,8 @@ _imenu_bash_many() {
     while IFS=$'\t' read -r k l; do keys+=("$k"); labels+=("$l"); mark+=(0); done
     local n=${#keys[@]}; [ "$n" -eq 0 ] && return 0
     local vh; vh=$(_imenu_vh "$n")
-    local cur=0 top=0 drawn=0 key i row idx allv ptr box
+    local cur=0 top=0 drawn=0 key i row idx allv ptr box disp
+    local maxw=$(( $(_imenu_cols) - 8 )); [ "$maxw" -lt 12 ] && maxw=12
     printf '\n%s  \033[2m(\xe2\x86\x91/\xe2\x86\x93 move \xc2\xb7 SPACE tick \xc2\xb7 a all \xc2\xb7 ENTER confirm \xc2\xb7 q cancel)\033[0m\n' "$prompt" >&2
     while true; do
         [ "$cur" -lt "$top" ] && top=$cur
@@ -1789,7 +1803,8 @@ _imenu_bash_many() {
                 ptr="  "; box="[ ]"
                 [ "$idx" -eq "$cur" ] && ptr=$'\033[36m> \033[0m'
                 [ "${mark[$idx]}" -eq 1 ] && box=$'\033[32m[x]\033[0m'
-                printf '\033[2K%b%b %s\n' "$ptr" "$box" "${labels[$idx]}" >&2
+                disp="${labels[$idx]}"; [ "${#disp}" -gt "$maxw" ] && disp="${disp:0:maxw}"
+                printf '\033[2K%b%b %s\n' "$ptr" "$box" "$disp" >&2
             else printf '\033[2K\n' >&2; fi
         done
         printf '\033[2K  \033[2m[%d/%d]\033[0m\n' "$((cur + 1))" "$n" >&2
@@ -1834,7 +1849,7 @@ _imenu_run() {
     fi
     local tags
     tags=$(echo "$effective" \
-        | jq -r 'to_entries[] | "\(.key)\t[\(.value.category)] \(.key) — \(.value.description // .value.command)"' \
+        | jq -r 'to_entries[] | "\(.key)\t[\(.value.category)] \(.key) - \(.value.description // .value.command)"' \
         | _imenu_many "Tick commands")
     [ -z "$tags" ] && return 0
     local mode
