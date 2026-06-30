@@ -233,9 +233,20 @@ cmdr --pack load ctf-web      # Load a pack
 | `ctf-network` | nmap scans, enum4linux, netcat, DNS | ctf-recon, ctf-enum, ctf-exploit |
 | `ctf-web` | ffuf, gobuster, sqlmap, nikto, wfuzz | ctf-web |
 | `ctf-privesc` | SUID, capabilities, cron, sudo, linpeas | ctf-privesc |
+| `pentest-ad` | Active Directory: NetExec, impacket (kerberoast/AS-REP/secretsdump/DCSync/psexec), kerbrute, BloodHound, certipy, Responder, ntlmrelayx, evil-winrm | ad-enum, ad-cred, ad-lateral, ad-adcs |
+| `pentest-web` | nuclei, ffuf (recursive/param/vhost), feroxbuster, katana, sqlmap, dalfox, jwt_tool, wpscan, gowitness | web-discovery, web-vuln, web-api |
+| `pentest-recon` | subfinder, amass, crt.sh, dnsx, httpx, naabu, masscan, katana, gau, waybackurls, nuclei pipelines | recon-subdomain, recon-http, recon-port |
+| `pentest-pivot` | chisel, ligolo-ng, sshuttle, SSH forwards, proxychains, socat relays, shell stabilize, SMB/HTTP transfer | pivot-tunnel, pivot-proxy, pivot-post, pivot-transfer |
 | `dev-python` | venv, pytest, flake8, http.server | dev-python |
 | `dev-docker` | build, run, compose, prune, exec | dev-docker |
 | `dev-git` | log, undo, amend, stash, branch cleanup | dev-git |
+
+> The `pentest-*` packs are for **authorized** engagements (CTF, labs, pentests
+> with written permission). Intrusive commands that can lock accounts, poison a
+> network, or get a remote shell (password spray, Responder, ntlmrelayx, psexec,
+> mass-scan, DB dump) are flagged `[!]` and always prompt before running — even
+> with `-y`. Most reference tools the `ctf-toolkit-setup` installer doesn't
+> include yet; install them yourself or see the issue tracker.
 
 ### Pairing with ctf-toolkit-setup
 
