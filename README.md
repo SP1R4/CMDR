@@ -414,13 +414,15 @@ cmdr -I          # or --menu / --interactive
 
 A top-level hub lets you:
 
-- **Run commands** — tick one or more (TAB in fzf, or numbers in the fallback);
-  pick run / dry-run / copy; placeholders are prompted as usual.
+- **Run commands** — tick one or more, then run / dry-run / copy; placeholders
+  are prompted as usual.
 - **Load packs** — tick which packs to import.
 - **Set an env var** or **switch workspace**.
 
-Uses `fzf` multi-select when available and falls back to a zero-dependency
-bash checklist otherwise. Needs a terminal (it exits cleanly if there isn't one).
+Navigate with the **arrow keys** (or vim `j`/`k`): **↑/↓** move, **SPACE** ticks,
+**a** ticks all, **ENTER** confirms, **q** cancels. Uses `fzf` (with fuzzy filter)
+when it's installed, otherwise a zero-dependency bash TUI with a scrolling
+viewport for long lists. Needs a terminal (exits cleanly if there isn't one).
 
 ## Workflows
 

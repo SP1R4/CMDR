@@ -1704,49 +1704,108 @@ pick_command() {
 # checklist fallback. UI goes to stderr / the tty; selected keys to stdout.
 # ----------------------------------------------------------------------------
 
-# Pure-bash single-select. Reads "key<TAB>label" lines on stdin; echoes one key.
-_imenu_bash_one() {
-    local prompt="$1" k l input i; local keys=() labels=()
-    while IFS=$'\t' read -r k l; do keys+=("$k"); labels+=("$l"); done
-    local n=${#keys[@]}
-    [ "$n" -eq 0 ] && return 0
-    {
-        echo ""; echo "$prompt"
-        for ((i=0; i<n; i++)); do printf "  %2d) %s\n" "$((i+1))" "${labels[$i]}"; done
-        printf "> "
-    } >&2
-    read -r input </dev/tty || return 0
-    if printf '%s' "$input" | grep -qE '^[0-9]+$' && [ "$input" -ge 1 ] && [ "$input" -le "$n" ]; then
-        printf '%s\n' "${keys[$((input - 1))]}"
-    fi
+# Read one keypress from the tty; echo a normalized token. Handles arrow keys
+# (and vim h/j/k/l), ENTER, SPACE, 'a', 'q'. bash 3.2 safe: arrow escape bytes
+# arrive together, so the integer -t 1 read returns immediately.
+_imenu_read_key() {
+    local k rest
+    IFS= read -rsn1 k </dev/tty 2>/dev/null || { printf 'quit'; return; }
+    case "$k" in
+        $'\x1b')
+            IFS= read -rsn2 -t 1 rest </dev/tty 2>/dev/null
+            case "$rest" in
+                '[A'|'OA') printf 'up' ;;
+                '[B'|'OB') printf 'down' ;;
+                *)         printf 'esc' ;;
+            esac ;;
+        ''|$'\n'|$'\r') printf 'enter' ;;
+        ' ')            printf 'space' ;;
+        k|K)            printf 'up' ;;
+        j|J)            printf 'down' ;;
+        a|A)            printf 'all' ;;
+        q|Q)            printf 'quit' ;;
+        *)              printf 'other' ;;
+    esac
 }
 
-# Pure-bash multi-select checklist. Reads "key<TAB>label"; echoes ticked keys.
-_imenu_bash_many() {
-    local prompt="$1" k l input i idx; local keys=() labels=() mark=()
-    while IFS=$'\t' read -r k l; do keys+=("$k"); labels+=("$l"); mark+=(" "); done
-    local n=${#keys[@]}
-    [ "$n" -eq 0 ] && return 0
+# Rows of the list to show at once (terminal height minus chrome).
+_imenu_vh() {
+    local n="$1" lines vh
+    lines=$(tput lines 2>/dev/null || echo 24)
+    vh=$(( lines > 8 ? lines - 6 : lines ))
+    [ "$vh" -lt 1 ] && vh=1
+    [ "$vh" -gt "$n" ] && vh="$n"
+    printf '%s' "$vh"
+}
+
+# Pure-bash single-select with arrow navigation + scrolling viewport.
+# Reads "key<TAB>label" lines on stdin; echoes the chosen key.
+_imenu_bash_one() {
+    local prompt="$1" k l; local keys=() labels=()
+    while IFS=$'\t' read -r k l; do keys+=("$k"); labels+=("$l"); done
+    local n=${#keys[@]}; [ "$n" -eq 0 ] && return 0
+    local vh; vh=$(_imenu_vh "$n")
+    local cur=0 top=0 drawn=0 key row idx
+    printf '\n%s  \033[2m(\xe2\x86\x91/\xe2\x86\x93 move \xc2\xb7 ENTER select \xc2\xb7 q cancel)\033[0m\n' "$prompt" >&2
     while true; do
-        {
-            echo ""; echo "$prompt"
-            echo "  (number=toggle, a=all, n=none, ENTER=confirm, q=cancel)"
-            for ((i=0; i<n; i++)); do printf "  [%s] %2d) %s\n" "${mark[$i]}" "$((i+1))" "${labels[$i]}"; done
-            printf "> "
-        } >&2
-        read -r input </dev/tty || input="q"
-        case "$input" in
-            "")  break ;;
-            q|Q) return 0 ;;
-            a|A) for ((i=0; i<n; i++)); do mark[$i]="x"; done ;;
-            n|N) for ((i=0; i<n; i++)); do mark[$i]=" "; done ;;
-            *)   if printf '%s' "$input" | grep -qE '^[0-9]+$' && [ "$input" -ge 1 ] && [ "$input" -le "$n" ]; then
-                     idx=$((input - 1))
-                     if [ "${mark[$idx]}" = "x" ]; then mark[$idx]=" "; else mark[$idx]="x"; fi
-                 fi ;;
+        [ "$cur" -lt "$top" ] && top=$cur
+        [ "$cur" -ge "$((top + vh))" ] && top=$((cur - vh + 1))
+        [ "$drawn" -eq 1 ] && printf '\033[%dA' "$((vh + 1))" >&2
+        for ((row=0; row<vh; row++)); do
+            idx=$((top + row))
+            if [ "$idx" -lt "$n" ]; then
+                if [ "$idx" -eq "$cur" ]; then printf '\033[2K\033[36m> %s\033[0m\n' "${labels[$idx]}" >&2
+                else printf '\033[2K  %s\n' "${labels[$idx]}" >&2; fi
+            else printf '\033[2K\n' >&2; fi
+        done
+        printf '\033[2K  \033[2m[%d/%d]\033[0m\n' "$((cur + 1))" "$n" >&2
+        drawn=1
+        key=$(_imenu_read_key)
+        case "$key" in
+            up)    cur=$(( (cur - 1 + n) % n )) ;;
+            down)  cur=$(( (cur + 1) % n )) ;;
+            enter) printf '%s\n' "${keys[$cur]}"; return 0 ;;
+            quit)  return 0 ;;
         esac
     done
-    for ((i=0; i<n; i++)); do [ "${mark[$i]}" = "x" ] && printf '%s\n' "${keys[$i]}"; done
+}
+
+# Pure-bash multi-select checklist with arrow navigation + scrolling viewport.
+# Reads "key<TAB>label"; echoes the ticked keys.
+_imenu_bash_many() {
+    local prompt="$1" k l; local keys=() labels=() mark=()
+    while IFS=$'\t' read -r k l; do keys+=("$k"); labels+=("$l"); mark+=(0); done
+    local n=${#keys[@]}; [ "$n" -eq 0 ] && return 0
+    local vh; vh=$(_imenu_vh "$n")
+    local cur=0 top=0 drawn=0 key i row idx allv ptr box
+    printf '\n%s  \033[2m(\xe2\x86\x91/\xe2\x86\x93 move \xc2\xb7 SPACE tick \xc2\xb7 a all \xc2\xb7 ENTER confirm \xc2\xb7 q cancel)\033[0m\n' "$prompt" >&2
+    while true; do
+        [ "$cur" -lt "$top" ] && top=$cur
+        [ "$cur" -ge "$((top + vh))" ] && top=$((cur - vh + 1))
+        [ "$drawn" -eq 1 ] && printf '\033[%dA' "$((vh + 1))" >&2
+        for ((row=0; row<vh; row++)); do
+            idx=$((top + row))
+            if [ "$idx" -lt "$n" ]; then
+                ptr="  "; box="[ ]"
+                [ "$idx" -eq "$cur" ] && ptr=$'\033[36m> \033[0m'
+                [ "${mark[$idx]}" -eq 1 ] && box=$'\033[32m[x]\033[0m'
+                printf '\033[2K%b%b %s\n' "$ptr" "$box" "${labels[$idx]}" >&2
+            else printf '\033[2K\n' >&2; fi
+        done
+        printf '\033[2K  \033[2m[%d/%d]\033[0m\n' "$((cur + 1))" "$n" >&2
+        drawn=1
+        key=$(_imenu_read_key)
+        case "$key" in
+            up)    cur=$(( (cur - 1 + n) % n )) ;;
+            down)  cur=$(( (cur + 1) % n )) ;;
+            space) if [ "${mark[$cur]}" -eq 1 ]; then mark[$cur]=0; else mark[$cur]=1; fi ;;
+            all)   allv=1; for ((i=0; i<n; i++)); do [ "${mark[$i]}" -eq 1 ] && allv=0; done
+                   for ((i=0; i<n; i++)); do mark[$i]=$allv; done ;;
+            enter) break ;;
+            quit)  return 0 ;;
+        esac
+    done
+    for ((i=0; i<n; i++)); do [ "${mark[$i]}" -eq 1 ] && printf '%s\n' "${keys[$i]}"; done
 }
 
 # Select wrappers: fzf when present, pure-bash otherwise.
