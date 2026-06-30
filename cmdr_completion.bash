@@ -17,7 +17,15 @@ _cmdr_completions() {
         local cmdr_path
         cmdr_path=$(command -v cmdr 2>/dev/null || true)
         if [ -n "$cmdr_path" ]; then
-            cmdr_path=$(readlink -f "$cmdr_path" 2>/dev/null || echo "$cmdr_path")
+            # Resolve symlinks portably (macOS/BSD readlink has no -f)
+            while [ -h "$cmdr_path" ]; do
+                local link
+                link=$(readlink "$cmdr_path")
+                case "$link" in
+                    /*) cmdr_path="$link" ;;
+                    *)  cmdr_path="$(dirname "$cmdr_path")/$link" ;;
+                esac
+            done
             data_dir=$(dirname "$cmdr_path")
         fi
     fi

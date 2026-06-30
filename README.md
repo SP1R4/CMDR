@@ -64,6 +64,14 @@ After install:
 cmdr -h
 ```
 
+**Platforms:** Linux and macOS. The only hard dependencies are `bash` and `jq`;
+CMDR runs on the stock macOS `/bin/bash` (3.2) and avoids GNU-only tool flags, so
+the same scripts work under both BSD and GNU userland. Optional features degrade
+gracefully when their tool is absent (`age`/`gpg` for encryption, `fzf` for the
+picker, `pandoc` for HTML/PDF reports, `timeout`/`gtimeout` for workflow timeouts,
+`pbcopy`/`xclip`/`xsel`/`wl-copy` for clipboard). CI runs the full suite on both
+Ubuntu and macOS.
+
 ## Quick Start
 
 ```bash
