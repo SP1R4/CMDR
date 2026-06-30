@@ -2094,6 +2094,48 @@ install_commands() {
         exit 1
     fi
     mv "$tmp_file" "$WRITE_COMMANDS_FILE"
+
+    # Enforce alias invariants on the merged store: an alias may not shadow any
+    # tag, nor be shared by two commands. (Interactive `-a` validates this, but a
+    # raw pack/import merge can introduce cross-pack collisions — e.g. one pack's
+    # tag equal to another's alias.) Tags always win; for a shared alias the first
+    # command (in store order) keeps it. Stripped aliases are reported.
+    local norm_json stripped
+    norm_json=$(jq '
+        ([keys[]]) as $tags
+        | reduce (to_entries[]) as $e ({out: {}, claimed: {}, stripped: []};
+            (reduce ($e.value.aliases // [])[] as $a
+                ({keep: [], claimed: .claimed, stripped: []};
+                    if ($tags | index($a)) != null then
+                        .stripped += [$e.key + " → " + $a + " (tag exists)"]
+                    elif (.claimed[$a] != null) then
+                        .stripped += [$e.key + " → " + $a + " (used by " + .claimed[$a] + ")"]
+                    else
+                        .keep += [$a] | .claimed[$a] = $e.key
+                    end
+                )) as $r
+            | .claimed = $r.claimed
+            | .stripped += $r.stripped
+            | .out[$e.key] = ($e.value
+                | if ($r.keep | length) > 0 then .aliases = $r.keep else del(.aliases) end)
+        )
+    ' "$WRITE_COMMANDS_FILE" 2>/dev/null)
+    stripped=$(printf '%s' "$norm_json" | jq -r '.stripped[]?' 2>/dev/null)
+    if [ -n "$stripped" ]; then
+        local tmp2
+        tmp2=$(_mktemp_beside "$WRITE_COMMANDS_FILE")
+        if printf '%s' "$norm_json" | jq '.out' > "$tmp2" 2>/dev/null; then
+            mv "$tmp2" "$WRITE_COMMANDS_FILE"
+            echo -e "${YELLOW}Note:${NC} stripped conflicting alias(es) to keep lookups unambiguous:"
+            while IFS= read -r s; do
+                [ -n "$s" ] && echo -e "  ${YELLOW}-${NC} $s"
+            done <<< "$stripped"
+            log_event "WARNING" "Stripped conflicting aliases on import from $input_file: $(printf '%s' "$stripped" | tr '\n' ';')"
+        else
+            rm -f "$tmp2"
+        fi
+    fi
+
     [ "$USE_LOCAL" = true ] && _retrust_local
 
     log_event "INFO" "Installed $imported commands from: $input_file ($skipped skipped)"
@@ -2516,6 +2558,19 @@ _lint_store() {
     done < <(jq -r 'to_entries[] | .key as $k | (.value.command // "") as $c
         | ($c | gsub("[^{]";"") | length) as $o | ($c | gsub("[^}]";"") | length) as $cl
         | select($o != $cl) | $k' "$file" 2>/dev/null)
+    # Alias shadows a *different* command's tag (an alias matching its own tag is
+    # redundant but allowed, matching validate_aliases).
+    while IFS= read -r k; do
+        [ -z "$k" ] && continue
+        echo -e "  ${RED}✗${NC} $label: alias '$k' shadows another command's tag"; LINT_TOTAL=$((LINT_TOTAL + 1))
+    done < <(jq -r '(keys) as $t
+        | to_entries[] | .key as $own | (.value.aliases // [])[]
+        | select(. as $a | ($t | index($a)) != null and $a != $own)' "$file" 2>/dev/null)
+    # Same alias claimed by two commands (same file)
+    while IFS= read -r k; do
+        [ -z "$k" ] && continue
+        echo -e "  ${RED}✗${NC} $label: alias '$k' is used by more than one command"; LINT_TOTAL=$((LINT_TOTAL + 1))
+    done < <(jq -r '[.[].aliases[]?] | group_by(.) | map(select(length > 1) | .[0]) | .[]' "$file" 2>/dev/null)
 }
 
 LINT_TOTAL=0
