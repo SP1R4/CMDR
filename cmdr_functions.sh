@@ -1841,16 +1841,21 @@ _imenu_run() {
     mode=$(printf '%s\n' $'run\tRun the ticked commands' $'dry\tDry-run (preview only)' $'copy\tCopy to clipboard' \
         | _imenu_one "Action")
     [ -z "$mode" ] && mode="run"
-    local t _odr="$DRY_RUN"
-    while IFS= read -r t; do
-        [ -z "$t" ] && continue
+    # Collect ticked tags into an array FIRST. Running inside a `while ... <<<`
+    # loop would redirect stdin to the tag list, so run_command's interactive
+    # prompts (placeholders, danger confirms) would read the wrong input / hang.
+    # A plain for-loop leaves stdin pointing at the terminal.
+    local t; local tarr=()
+    while IFS= read -r t; do [ -n "$t" ] && tarr+=("$t"); done <<< "$tags"
+    local _odr="$DRY_RUN"
+    for t in "${tarr[@]}"; do
         echo -e "\n${CYAN}▶ $t${NC}" >&2
         case "$mode" in
             dry)  DRY_RUN=true; run_command "$t"; DRY_RUN="$_odr" ;;
             copy) clipboard_copy "$t" ;;
             *)    run_command "$t" ;;
         esac
-    done <<< "$tags"
+    done
 }
 
 # Tick packs, load each ticked one.
@@ -1862,8 +1867,9 @@ _imenu_packs() {
                 printf '%s\t%s (%s commands)\n' "$b" "$b" "$c"
             done | _imenu_many "Tick packs to load" )
     [ -z "$list" ] && return 0
-    local p
-    while IFS= read -r p; do [ -n "$p" ] && load_pack "$p"; done <<< "$list"
+    local p; local parr=()
+    while IFS= read -r p; do [ -n "$p" ] && parr+=("$p"); done <<< "$list"
+    for p in "${parr[@]}"; do load_pack "$p"; done
 }
 
 # Prompt for an env var name + value.
