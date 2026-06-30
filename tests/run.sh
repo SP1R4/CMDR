@@ -274,6 +274,14 @@ for i in 1 2 3 4 5 6; do ( "$C" -a "c$i" "echo $i" x >/dev/null 2>&1 ) & done; w
 N=$(jq 'keys|length' "$CMDR_DATA_DIR/my_commands.json" 2>/dev/null)
 if [ "$N" = "6" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED+=("concurrency (only $N/6 landed)"); fi
 
+section "INTERACTIVE MENU (optional, guarded)"
+newdata
+# Without a TTY the menu must exit cleanly (never hang) and say so.
+okc  "menu-no-tty-exit-I"   0  "$C" -I
+okc  "menu-no-tty-exit-alt" 0  "$C" --menu
+okg  "menu-no-tty-message"  "needs a terminal"  "$C" --interactive
+okg  "menu-help-listed"     "Interactive tick-menu"  "$C" -h
+
 echo ""
 echo "════════════════════════════════════════════"
 echo " RESULTS: PASS=$PASS  FAIL=$FAIL"
