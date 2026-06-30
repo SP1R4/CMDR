@@ -522,6 +522,7 @@ main() {
                 [ "${1:-}" = "--help" ] && { display_subcommand_help "interactive"; exit 0; }
                 ;;
             --pick)         action="pick"; shift ;;
+            -I|--menu|--interactive) action="menu"; shift ;;
             --lock-workspace)
                 action="lock_workspace"; shift
                 [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
@@ -616,6 +617,7 @@ main() {
 
         # Picker & encrypted workspaces
         pick)             pick_command ;;
+        menu)             interactive_menu ;;
         lock_workspace)   lock_workspace "${action_args[0]:-}" ;;
         unlock_workspace) unlock_workspace "${action_args[0]:-}" ;;
 

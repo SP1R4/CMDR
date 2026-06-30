@@ -1698,6 +1698,170 @@ pick_command() {
 }
 
 # ----------------------------------------------------------------------------
+# Section 8e: Interactive Menu (optional, tick-based)
+# An opt-in TUI (cmdr -I / --menu) that lets you tick options instead of typing
+# flags. Uses fzf multi-select when available, with a zero-dependency pure-bash
+# checklist fallback. UI goes to stderr / the tty; selected keys to stdout.
+# ----------------------------------------------------------------------------
+
+# Pure-bash single-select. Reads "key<TAB>label" lines on stdin; echoes one key.
+_imenu_bash_one() {
+    local prompt="$1" k l input i; local keys=() labels=()
+    while IFS=$'\t' read -r k l; do keys+=("$k"); labels+=("$l"); done
+    local n=${#keys[@]}
+    [ "$n" -eq 0 ] && return 0
+    {
+        echo ""; echo "$prompt"
+        for ((i=0; i<n; i++)); do printf "  %2d) %s\n" "$((i+1))" "${labels[$i]}"; done
+        printf "> "
+    } >&2
+    read -r input </dev/tty || return 0
+    if printf '%s' "$input" | grep -qE '^[0-9]+$' && [ "$input" -ge 1 ] && [ "$input" -le "$n" ]; then
+        printf '%s\n' "${keys[$((input - 1))]}"
+    fi
+}
+
+# Pure-bash multi-select checklist. Reads "key<TAB>label"; echoes ticked keys.
+_imenu_bash_many() {
+    local prompt="$1" k l input i idx; local keys=() labels=() mark=()
+    while IFS=$'\t' read -r k l; do keys+=("$k"); labels+=("$l"); mark+=(" "); done
+    local n=${#keys[@]}
+    [ "$n" -eq 0 ] && return 0
+    while true; do
+        {
+            echo ""; echo "$prompt"
+            echo "  (number=toggle, a=all, n=none, ENTER=confirm, q=cancel)"
+            for ((i=0; i<n; i++)); do printf "  [%s] %2d) %s\n" "${mark[$i]}" "$((i+1))" "${labels[$i]}"; done
+            printf "> "
+        } >&2
+        read -r input </dev/tty || input="q"
+        case "$input" in
+            "")  break ;;
+            q|Q) return 0 ;;
+            a|A) for ((i=0; i<n; i++)); do mark[$i]="x"; done ;;
+            n|N) for ((i=0; i<n; i++)); do mark[$i]=" "; done ;;
+            *)   if printf '%s' "$input" | grep -qE '^[0-9]+$' && [ "$input" -ge 1 ] && [ "$input" -le "$n" ]; then
+                     idx=$((input - 1))
+                     if [ "${mark[$idx]}" = "x" ]; then mark[$idx]=" "; else mark[$idx]="x"; fi
+                 fi ;;
+        esac
+    done
+    for ((i=0; i<n; i++)); do [ "${mark[$i]}" = "x" ] && printf '%s\n' "${keys[$i]}"; done
+}
+
+# Select wrappers: fzf when present, pure-bash otherwise.
+_imenu_one()  {
+    if command -v fzf >/dev/null 2>&1; then
+        fzf --delimiter='\t' --with-nth=2.. --prompt="$1 > " --height=60% --reverse | cut -f1
+    else
+        _imenu_bash_one "$1"
+    fi
+}
+_imenu_many() {
+    if command -v fzf >/dev/null 2>&1; then
+        fzf --multi --delimiter='\t' --with-nth=2.. --prompt="$1 (TAB=tick) > " \
+            --height=70% --reverse --header='TAB tick · ENTER confirm · ESC cancel' | cut -f1
+    else
+        _imenu_bash_many "$1"
+    fi
+}
+
+# Tick commands, then run / dry-run / copy each ticked one (placeholders are
+# filled by the normal run path, which prompts and pre-fills from env).
+_imenu_run() {
+    local effective; effective=$(get_effective_commands)
+    if [ "$(echo "$effective" | jq 'length' 2>/dev/null || echo 0)" -eq 0 ]; then
+        echo -e "${YELLOW}No commands available.${NC}" >&2; return 0
+    fi
+    local tags
+    tags=$(echo "$effective" \
+        | jq -r 'to_entries[] | "\(.key)\t[\(.value.category)] \(.key) — \(.value.description // .value.command)"' \
+        | _imenu_many "Tick commands")
+    [ -z "$tags" ] && return 0
+    local mode
+    mode=$(printf '%s\n' $'run\tRun the ticked commands' $'dry\tDry-run (preview only)' $'copy\tCopy to clipboard' \
+        | _imenu_one "Action")
+    [ -z "$mode" ] && mode="run"
+    local t _odr="$DRY_RUN"
+    while IFS= read -r t; do
+        [ -z "$t" ] && continue
+        echo -e "\n${CYAN}▶ $t${NC}" >&2
+        case "$mode" in
+            dry)  DRY_RUN=true; run_command "$t"; DRY_RUN="$_odr" ;;
+            copy) clipboard_copy "$t" ;;
+            *)    run_command "$t" ;;
+        esac
+    done <<< "$tags"
+}
+
+# Tick packs, load each ticked one.
+_imenu_packs() {
+    local list
+    list=$( for f in "$PACKS_DIR"/*.json; do
+                [ -f "$f" ] || continue
+                local b c; b=$(basename "$f" .json); c=$(jq 'length' "$f" 2>/dev/null || echo 0)
+                printf '%s\t%s (%s commands)\n' "$b" "$b" "$c"
+            done | _imenu_many "Tick packs to load" )
+    [ -z "$list" ] && return 0
+    local p
+    while IFS= read -r p; do [ -n "$p" ] && load_pack "$p"; done <<< "$list"
+}
+
+# Prompt for an env var name + value.
+_imenu_env() {
+    local k v
+    printf "Variable name: " >&2; read -r k </dev/tty || return 0
+    [ -z "$k" ] && return 0
+    printf "Value for %s: " "$k" >&2; read -r v </dev/tty || return 0
+    set_env_var "$k=$v"
+}
+
+# Pick a workspace to switch to (default + any under workspaces/).
+_imenu_workspace() {
+    local ws
+    ws=$( {
+            printf '%s\t%s\n' default "default"
+            if [ -d "$DATA_DIR/workspaces" ]; then
+                for d in "$DATA_DIR/workspaces"/*/; do
+                    [ -d "$d" ] || continue
+                    local n; n=$(basename "$d"); printf '%s\t%s\n' "$n" "$n"
+                done
+            fi
+          } | _imenu_one "Switch workspace" )
+    [ -n "$ws" ] && switch_workspace "$ws"
+}
+
+# Top-level hub. Optional: only runs with a real terminal on stdin.
+interactive_menu() {
+    if [ ! -t 0 ]; then
+        echo -e "${YELLOW}The interactive menu (cmdr -I) needs a terminal.${NC}" >&2
+        return 0
+    fi
+    notify_untrusted_local
+    log_event "INFO" "Entered interactive menu"
+    echo -e "${BOLD}${YELLOW}CMDR — interactive menu${NC}" >&2
+    [ "$ACTIVE_WORKSPACE" != "default" ] && echo -e "${CYAN}Workspace: $ACTIVE_WORKSPACE${NC}" >&2
+    while true; do
+        local action
+        action=$(printf '%s\n' \
+            $'run\tRun commands (tick one or more)' \
+            $'pack\tLoad command packs' \
+            $'env\tSet an environment variable' \
+            $'ws\tSwitch workspace' \
+            $'show\tShow all commands' \
+            $'quit\tQuit' | _imenu_one "CMDR menu")
+        case "$action" in
+            run)  _imenu_run ;;
+            pack) _imenu_packs ;;
+            env)  _imenu_env ;;
+            ws)   _imenu_workspace ;;
+            show) show_commands ;;
+            quit|"") echo -e "${GREEN}Bye.${NC}" >&2; return 0 ;;
+        esac
+    done
+}
+
+# ----------------------------------------------------------------------------
 # Section 8f: Encrypted Workspaces
 # Encrypt a named workspace's directory to a single blob at rest (age or gpg).
 # ----------------------------------------------------------------------------
@@ -2885,6 +3049,7 @@ display_help() {
     echo "  -f <keyword>                                   Search commands"
     echo "  -c <tag> [args...]                             Copy command to clipboard"
     echo "  --pick                                         Fuzzy-pick a command (fzf)"
+    echo "  -I, --menu                                     Interactive tick-menu (fzf multi-select; bash fallback)"
     echo ""
     echo -e "${YELLOW}Run Options (with -r):${NC}"
     echo "  --save                 Save output to outputs/"

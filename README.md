@@ -34,6 +34,7 @@ variables, playbooks, output capture, findings, and extensible command packs.
 | **Encrypted Workspaces** | Lock a workspace to an encrypted blob at rest (age/gpg) |
 | **Danger Flag** | `--danger` commands always confirm before running, even with `-y` |
 | **Fuzzy Picker** | `--pick` (or bare `cmdr`) fuzzy-find a command via fzf |
+| **Interactive Menu** | `-I` / `--menu` — optional tick-menu: checkbox-select commands/packs (fzf multi-select, bash fallback) |
 | **Workspaces** | Isolated command stores per engagement or project |
 | **Environment Variables** | Set `TARGET=10.10.10.1` once, use `{TARGET}` everywhere |
 | **Playbooks** | Chain commands into named, reusable sequences |
@@ -401,6 +402,25 @@ cmdr --unlock-workspace client-x # decrypt and restore
 cmdr --pick      # fuzzy-find a command with fzf and run it
 cmdr             # bare invocation on a TTY also opens the picker (falls back to -m)
 ```
+
+## Interactive Menu
+
+An optional, tick-based menu — for when you'd rather select than type flags. The
+normal CLI is unchanged; this is just another way in.
+
+```bash
+cmdr -I          # or --menu / --interactive
+```
+
+A top-level hub lets you:
+
+- **Run commands** — tick one or more (TAB in fzf, or numbers in the fallback);
+  pick run / dry-run / copy; placeholders are prompted as usual.
+- **Load packs** — tick which packs to import.
+- **Set an env var** or **switch workspace**.
+
+Uses `fzf` multi-select when available and falls back to a zero-dependency
+bash checklist otherwise. Needs a terminal (it exits cleanly if there isn't one).
 
 ## Workflows
 
