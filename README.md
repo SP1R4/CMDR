@@ -221,7 +221,7 @@ cmdr --pack load ctf-web      # Load a pack
 | Pack | Commands | Category |
 |------|----------|----------|
 | `starter` | handy sysadmin/network/dev/security one-liners | mixed |
-| `ctf-toolkit` | full companion set for [ctf-toolkit-setup](https://github.com/SP1R4/ctf-toolkit-setup) (ffuf, nuclei, httpx, feroxbuster, gdb/GEF, radare2, pwntools, john, hashcat, hydra, hashcracker, steghide, stegseek, zsteg, vol3, RsaCtfTool, …) | tk-recon, tk-web, tk-pwn, tk-crypto, tk-forensics, tk-crack, tk-shell |
+| `ctf-toolkit` | full companion set for [ctf-toolkit-setup](https://github.com/SP1R4/ctf-toolkit-setup) (ffuf, nuclei, httpx, feroxbuster, gdb/GEF, radare2, pwntools, john, hashcat, hydra, hashcracker, steghide, stegseek, zsteg, vol3, RsaCtfTool, [BackupHandler](https://github.com/SP1R4/BackupHandler), …) | tk-recon, tk-web, tk-pwn, tk-crypto, tk-forensics, tk-crack, tk-shell, tk-backup |
 | `ctf-network` | nmap scans, enum4linux, netcat, DNS | ctf-recon, ctf-enum, ctf-exploit |
 | `ctf-web` | ffuf, gobuster, sqlmap, nikto, wfuzz | ctf-web |
 | `ctf-privesc` | SUID, capabilities, cron, sudo, linpeas | ctf-privesc |

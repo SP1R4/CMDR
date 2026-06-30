@@ -249,5 +249,52 @@
     "command": "proxychains4 nmap -sT -Pn {TARGET}",
     "category": "tk-shell",
     "description": "Pivot an nmap TCP scan through proxychains"
+  },
+  "tk-backup": {
+    "command": "backup-handler --operation-modes {MODES:=local} --backup-mode {MODE:=incremental}",
+    "category": "tk-backup",
+    "description": "Run a backup (SP1R4/BackupHandler). MODES: local/ssh/s3/db; MODE: full/incremental/differential",
+    "aliases": ["bh"]
+  },
+  "tk-backup-dryrun": {
+    "command": "backup-handler --operation-modes {MODES:=local} --backup-mode {MODE:=incremental} --dry-run",
+    "category": "tk-backup",
+    "description": "Preview a backup without copying anything",
+    "aliases": ["bh-dry"]
+  },
+  "tk-backup-status": {
+    "command": "backup-handler --status",
+    "category": "tk-backup",
+    "description": "Show last backup times, sizes, and latest manifest summary",
+    "aliases": ["bh-status"]
+  },
+  "tk-backup-verify": {
+    "command": "backup-handler --verify",
+    "category": "tk-backup",
+    "description": "Verify backup integrity against the latest manifest checksums"
+  },
+  "tk-backup-setup": {
+    "command": "backup-handler --show-setup",
+    "category": "tk-backup",
+    "description": "Display the current backup configuration"
+  },
+  "tk-backup-restore": {
+    "command": "backup-handler --restore --from-dir {FROM:?} --to-dir {TO:?}",
+    "category": "tk-backup",
+    "description": "Restore files from a backup dir/archive to a destination",
+    "aliases": ["bh-restore"]
+  },
+  "tk-backup-snapshot": {
+    "command": "backup-handler --snapshot --snapshot-output {OUT:=./snapshot.json}",
+    "category": "tk-backup",
+    "description": "Capture a system-state snapshot (packages/configs) for OS rebuild",
+    "aliases": ["bh-snap"]
+  },
+  "tk-backup-install": {
+    "command": "sudo backup-handler --install",
+    "category": "tk-backup",
+    "description": "One-shot system bootstrap (mount, fstab, sudoers, MTA). Requires root; idempotent",
+    "aliases": ["bh-install"],
+    "danger": true
   }
 }
