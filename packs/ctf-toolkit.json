@@ -1,0 +1,253 @@
+{
+  "tk-nmap-quick": {
+    "command": "nmap -sV -sC -oN nmap_{TARGET}.txt {TARGET}",
+    "category": "tk-recon",
+    "description": "nmap service + default scripts (ctf-toolkit)",
+    "aliases": ["tkqs"]
+  },
+  "tk-nmap-full": {
+    "command": "nmap -p- --min-rate 5000 -sV -oN nmapfull_{TARGET}.txt {TARGET}",
+    "category": "tk-recon",
+    "description": "nmap all-ports + version scan (ctf-toolkit)",
+    "aliases": ["tkfull"]
+  },
+  "tk-masscan": {
+    "command": "masscan -p1-65535 {TARGET} --rate 1000 -oL masscan_{TARGET}.txt",
+    "category": "tk-recon",
+    "description": "masscan all TCP ports (fast, needs root)"
+  },
+  "tk-enum4linux": {
+    "command": "enum4linux -a {TARGET}",
+    "category": "tk-recon",
+    "description": "SMB/NetBIOS enumeration with enum4linux",
+    "aliases": ["e4l"]
+  },
+  "tk-snmpwalk": {
+    "command": "snmpwalk -v2c -c public {TARGET}",
+    "category": "tk-recon",
+    "description": "SNMP walk with the 'public' community string"
+  },
+  "tk-dnsrecon": {
+    "command": "dnsrecon -d {DOMAIN} -t std,axfr",
+    "category": "tk-recon",
+    "description": "DNS enumeration + zone-transfer attempt",
+    "aliases": ["dnsr"]
+  },
+  "tk-dig-axfr": {
+    "command": "dig axfr {DOMAIN} @{TARGET}",
+    "category": "tk-recon",
+    "description": "DNS zone transfer via dig"
+  },
+  "tk-ffuf": {
+    "command": "ffuf -u http://{TARGET}:{PORT:=80}/FUZZ -w {WORDLIST:=/usr/share/dirb/wordlists/common.txt} -mc 200,204,301,302,307,401,403",
+    "category": "tk-web",
+    "description": "Directory/content fuzzing with ffuf",
+    "aliases": ["tkffuf"]
+  },
+  "tk-feroxbuster": {
+    "command": "feroxbuster -u http://{TARGET}:{PORT:=80} -w {WORDLIST:=/usr/share/dirb/wordlists/common.txt}",
+    "category": "tk-web",
+    "description": "Recursive content discovery with feroxbuster",
+    "aliases": ["ferox"]
+  },
+  "tk-gobuster": {
+    "command": "gobuster dir -u http://{TARGET}:{PORT:=80} -w {WORDLIST:=/usr/share/dirb/wordlists/common.txt} -x php,txt,html -t 50",
+    "category": "tk-web",
+    "description": "Directory brute-force with gobuster (+extensions)",
+    "aliases": ["tkgob"]
+  },
+  "tk-vhost": {
+    "command": "ffuf -u http://{TARGET}:{PORT:=80} -H 'Host: FUZZ.{DOMAIN}' -w {WORDLIST:=/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt} -fc 404",
+    "category": "tk-web",
+    "description": "Virtual-host / subdomain fuzzing with ffuf",
+    "aliases": ["tkvhost"]
+  },
+  "tk-nuclei": {
+    "command": "nuclei -u http://{TARGET}:{PORT:=80}",
+    "category": "tk-web",
+    "description": "Template-based vuln scan (run 'nuclei -update-templates' first)",
+    "aliases": ["nuc"]
+  },
+  "tk-httpx": {
+    "command": "httpx -u {TARGET} -title -tech-detect -status-code",
+    "category": "tk-web",
+    "description": "HTTP probing: title, tech, status"
+  },
+  "tk-nikto": {
+    "command": "nikto -h http://{TARGET}:{PORT:=80}",
+    "category": "tk-web",
+    "description": "Web server vulnerability scan"
+  },
+  "tk-whatweb": {
+    "command": "whatweb -a 3 http://{TARGET}:{PORT:=80}",
+    "category": "tk-web",
+    "description": "Aggressive web technology fingerprinting"
+  },
+  "tk-sqlmap": {
+    "command": "sqlmap -u '{URL}' --batch --level 3 --risk 2",
+    "category": "tk-web",
+    "description": "Automated SQL injection scan",
+    "aliases": ["tksqli"]
+  },
+  "tk-wpscan": {
+    "command": "wpscan --url http://{TARGET}:{PORT:=80} --enumerate vp,vt,u",
+    "category": "tk-web",
+    "description": "WordPress vuln + user enumeration (gem)"
+  },
+  "tk-john": {
+    "command": "john --wordlist={ROCKYOU:=/usr/share/wordlists/rockyou.txt} {HASHFILE:?}",
+    "category": "tk-crack",
+    "description": "Crack hashes with John (rockyou)",
+    "aliases": ["tkjohn"]
+  },
+  "tk-hashcat": {
+    "command": "hashcat -m {MODE:?} {HASHFILE:?} {ROCKYOU:=/usr/share/wordlists/rockyou.txt}",
+    "category": "tk-crack",
+    "description": "Crack hashes with hashcat (set -m mode)"
+  },
+  "tk-hydra-ssh": {
+    "command": "hydra -l {USER} -P {ROCKYOU:=/usr/share/wordlists/rockyou.txt} ssh://{TARGET}",
+    "category": "tk-crack",
+    "description": "SSH password brute force with hydra",
+    "aliases": ["tkhydra"]
+  },
+  "tk-hashcracker": {
+    "command": "hashcracker '{HASH:?}'",
+    "category": "tk-crack",
+    "description": "Identify + crack a hash (SP1R4/hashcracker, via pipx)",
+    "aliases": ["hc"]
+  },
+  "tk-fcrackzip": {
+    "command": "fcrackzip -u -D -p {ROCKYOU:=/usr/share/wordlists/rockyou.txt} {FILE:?}",
+    "category": "tk-crack",
+    "description": "Dictionary attack on a ZIP archive"
+  },
+  "tk-pdfcrack": {
+    "command": "pdfcrack -w {ROCKYOU:=/usr/share/wordlists/rockyou.txt} {FILE:?}",
+    "category": "tk-crack",
+    "description": "Crack a password-protected PDF"
+  },
+  "tk-checksec": {
+    "command": "checksec --file={FILE:?}",
+    "category": "tk-pwn",
+    "description": "Show binary mitigations (RELRO/NX/PIE/Canary)",
+    "aliases": ["csec"]
+  },
+  "tk-gdb": {
+    "command": "gdb -q {FILE:?}",
+    "category": "tk-pwn",
+    "description": "Debug a binary (GEF auto-loads via ~/.gdbinit)",
+    "aliases": ["tkgdb"]
+  },
+  "tk-radare2": {
+    "command": "r2 -A {FILE:?}",
+    "category": "tk-pwn",
+    "description": "Open + auto-analyze a binary in radare2",
+    "aliases": ["r2"]
+  },
+  "tk-ropgadget": {
+    "command": "ROPgadget --binary {FILE:?}",
+    "category": "tk-pwn",
+    "description": "Find ROP gadgets in a binary",
+    "aliases": ["rop"]
+  },
+  "tk-ropper": {
+    "command": "ropper --file {FILE:?}",
+    "category": "tk-pwn",
+    "description": "ROP gadget search with ropper"
+  },
+  "tk-onegadget": {
+    "command": "one_gadget {LIBC:=/lib/x86_64-linux-gnu/libc.so.6}",
+    "category": "tk-pwn",
+    "description": "Find libc one-shot RCE gadgets (gem)"
+  },
+  "tk-pwninit": {
+    "command": "pwninit",
+    "category": "tk-pwn",
+    "description": "Auto-set up a pwn challenge (patch libc/loader)"
+  },
+  "tk-pwn-template": {
+    "command": "pwn template {FILE:?} > exploit.py",
+    "category": "tk-pwn",
+    "description": "Generate a pwntools exploit skeleton"
+  },
+  "tk-qemu-x86": {
+    "command": "qemu-x86_64 {FILE:?}",
+    "category": "tk-pwn",
+    "description": "Run an x86_64 binary (useful on ARM64 via qemu-user-static)"
+  },
+  "tk-binwalk": {
+    "command": "binwalk -e {FILE:?}",
+    "category": "tk-forensics",
+    "description": "Scan + extract embedded files"
+  },
+  "tk-exiftool": {
+    "command": "exiftool {FILE:?}",
+    "category": "tk-forensics",
+    "description": "Read file metadata"
+  },
+  "tk-steghide": {
+    "command": "steghide extract -sf {FILE:?}",
+    "category": "tk-forensics",
+    "description": "Extract data hidden with steghide"
+  },
+  "tk-stegseek": {
+    "command": "stegseek {FILE:?} {ROCKYOU:=/usr/share/wordlists/rockyou.txt}",
+    "category": "tk-forensics",
+    "description": "Brute-force a steghide passphrase (fast)"
+  },
+  "tk-zsteg": {
+    "command": "zsteg -a {FILE:?}",
+    "category": "tk-forensics",
+    "description": "Detect LSB stego in PNG/BMP (gem)"
+  },
+  "tk-foremost": {
+    "command": "foremost -i {FILE:?} -o foremost_out",
+    "category": "tk-forensics",
+    "description": "Carve files by signature"
+  },
+  "tk-vol3": {
+    "command": "vol -f {FILE:?} {PLUGIN:=windows.info}",
+    "category": "tk-forensics",
+    "description": "Memory forensics with volatility3 (command is 'vol')"
+  },
+  "tk-rsactftool": {
+    "command": "python3 ~/tools/RsaCtfTool/RsaCtfTool.py --publickey {FILE:?} --private",
+    "category": "tk-crypto",
+    "description": "Automated RSA attacks (cloned to ~/tools/RsaCtfTool)",
+    "aliases": ["rsactf"]
+  },
+  "tk-sage": {
+    "command": "sage",
+    "category": "tk-crypto",
+    "description": "Launch SageMath REPL for crypto math"
+  },
+  "tk-listener": {
+    "command": "nc -lvnp {LPORT:=4444}",
+    "category": "tk-shell",
+    "description": "Netcat reverse-shell listener",
+    "aliases": ["tklisten"]
+  },
+  "tk-serve": {
+    "command": "python3 -m http.server {PORT:=8080}",
+    "category": "tk-shell",
+    "description": "HTTP server to host files",
+    "aliases": ["tkserve"]
+  },
+  "tk-smbserver": {
+    "command": "impacket-smbserver share . -smb2support",
+    "category": "tk-shell",
+    "description": "Anonymous SMB share of cwd (impacket) for transfer",
+    "aliases": ["tksmb"]
+  },
+  "tk-socat-listener": {
+    "command": "socat TCP-LISTEN:{LPORT:=4444},reuseaddr,fork -",
+    "category": "tk-shell",
+    "description": "socat TCP listener (sturdier than nc)"
+  },
+  "tk-proxychains-nmap": {
+    "command": "proxychains4 nmap -sT -Pn {TARGET}",
+    "category": "tk-shell",
+    "description": "Pivot an nmap TCP scan through proxychains"
+  }
+}
