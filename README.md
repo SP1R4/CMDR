@@ -104,6 +104,10 @@ cmdr -s
 cmdr -f nmap
 ```
 
+> **Tip:** prefer ticking over typing? Run `cmdr -I` (or `--menu`) for an
+> interactive, arrow-key menu — select commands to run, load packs, set env
+> vars, and switch workspaces. See [Interactive Menu](#interactive-menu).
+
 ## CTF Workflow
 
 ```bash
