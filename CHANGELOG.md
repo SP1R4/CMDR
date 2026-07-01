@@ -4,6 +4,42 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0]
+
+### Added
+- **`--json` output mode**: machine-readable JSON for the read commands
+  (`-s`, `-f`, `--history`, `--findings`, `--host list`, `-W`, `--pack list`),
+  so CMDR composes with `jq`, scripts, and other tools.
+- **`--import <source>`**: pull commands from external sources into the store
+  with a preview-then-confirm flow (skip with `-y`, preview-only with `-n`).
+  Sources: `history` (recent unique shell history), `tldr <page>`,
+  `cheat <topic>` (via curl), and `file <path>` (JSON pack/array or a plain-text
+  list). Duplicate tags are auto-uniquified, never overwritten. Honors `--local`.
+- **Optional SQLite search index**: when `sqlite3` is present and a store is
+  large, `-f`/search is answered from a SQLite mirror instead of a full jq scan.
+  The JSON store stays the source of truth; the mirror is rebuilt only when the
+  JSON changes. Off by default for small stores (identical output); force with
+  `CMDR_INDEX=1`, disable with `CMDR_INDEX=0`. The `.cmdr_index.db` cache is
+  kept out of `--sync` via an auto-seeded `.gitignore`.
+- **Richer fzf picker**: the bare `cmdr` / `--pick` picker now shows a live
+  preview (category, aliases, danger flag, description, full command,
+  placeholders, notes, last run) and key bindings — `enter` run, `ctrl-n`
+  dry-run, `ctrl-y` copy, `ctrl-/` toggle preview.
+- **bats test suite** (`tests/cmdr.bats`) alongside the existing `tests/run.sh`,
+  which now also covers `--json`, `--import`, index parity, and run-path locking.
+
+### Changed
+- **Modularized `cmdr_functions.sh`** into focused `lib/*.sh` modules loaded by
+  a thin loader — same public surface, easier to navigate and test. (No change
+  to how `cmdr.sh` is invoked or installed.)
+- **Command listing** (`-s`) now renders in a single `jq` pass instead of one
+  per category.
+
+### Fixed
+- **Run-path write races**: run history and `--capture` env writes now take the
+  same short-lived store lock as CRUD writes, so concurrent `cmdr -r` calls no
+  longer lose history entries or captured variables.
+
 ## [3.2.0]
 
 ### Added

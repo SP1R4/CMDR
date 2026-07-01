@@ -9,7 +9,7 @@
 # See `cmdr -h` for full usage or `cmdr <flag> --help` for per-command help.
 # ============================================================================
 
-CMDR_VERSION="3.2.0"
+CMDR_VERSION="3.3.0"
 
 # Resolve the script's install directory (follows symlinks)
 SOURCE="${BASH_SOURCE[0]}"
@@ -84,6 +84,7 @@ VERBOSITY="INFO"
 DRY_RUN=false
 SAVE_OUTPUT=false
 USE_LOCAL=false
+CMDR_JSON=false
 CMDR_DESC=""
 CMDR_ALIASES=()
 CMDR_FORCE_YES=false
@@ -196,6 +197,7 @@ main() {
             -n|--dry-run) DRY_RUN=true; log_event "DEBUG" "Dry-run mode enabled" ;;
             --local)   USE_LOCAL=true; log_event "DEBUG" "Local mode enabled" ;;
             --save)    SAVE_OUTPUT=true; log_event "DEBUG" "Save output enabled" ;;
+            --json)    CMDR_JSON=true; log_event "DEBUG" "JSON output enabled" ;;
         esac
     done
 
@@ -500,6 +502,21 @@ main() {
                 ;;
 
             # --- Import/Export ---
+            --import)
+                action="import_ext"; shift
+                [ "${1:-}" = "--help" ] && { display_subcommand_help "import"; exit 0; }
+                # source + up to one positional arg (page/topic/path/count); a
+                # trailing -y is captured as the force-yes modifier.
+                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
+                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        -y) CMDR_FORCE_YES=true; shift ;;
+                        -v|-n|--dry-run|--local|--save|--json) shift ;;
+                        *) break ;;
+                    esac
+                done
+                ;;
             -x)
                 action="extract"; shift
                 [ "${1:-}" = "--help" ] && { display_subcommand_help "extract"; exit 0; }
@@ -538,7 +555,7 @@ main() {
             -V|--version)   echo "CMDR v${CMDR_VERSION}"; exit 0 ;;
 
             # Global modifiers (already pre-scanned)
-            -v|-n|--dry-run|--local|--save) shift ;;
+            -v|-n|--dry-run|--local|--save|--json) shift ;;
 
             *)
                 log_event "ERROR" "Invalid option: $1"
@@ -550,7 +567,7 @@ main() {
 
     # ----- Lock only mutating actions, for the duration of the write -----
     case "$action" in
-        add|edit|delete|set_env|clear_env|create_playbook|add_note|install|load_pack|undo|switch_workspace|trust_local|untrust_local|host_add|host_rm|add_finding|lock_workspace|unlock_workspace|flow_import|set_secret|clear_secret)
+        add|edit|delete|set_env|clear_env|create_playbook|add_note|install|load_pack|undo|switch_workspace|trust_local|untrust_local|host_add|host_rm|add_finding|lock_workspace|unlock_workspace|flow_import|set_secret|clear_secret|import_ext)
             acquire_lock ;;
     esac
 
@@ -623,6 +640,7 @@ main() {
 
         # Import/Export & Packs
         extract)          extract_commands "${action_args[@]}" ;;
+        import_ext)       import_external "${action_args[@]}" ;;
         logs)             extract_logs "${action_args[@]}" ;;
         install)          install_commands "${action_args[@]}" ;;
         list_packs)       list_packs ;;

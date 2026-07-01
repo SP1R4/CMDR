@@ -15,7 +15,7 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: Lint shell scripts
-        run: shellcheck -x -S warning cmdr.sh cmdr_functions.sh install.sh tests/run.sh
+        run: shellcheck -x -S warning cmdr.sh cmdr_functions.sh lib/*.sh install.sh tests/run.sh
 
   test:
     name: Test suite (${{ matrix.os }})

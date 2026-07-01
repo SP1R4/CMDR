@@ -15,3 +15,5 @@ my_commands.json
 outputs/
 workspaces/
 .cmdr.tmp.*
+.cmdr_index.db
+.DS_Store

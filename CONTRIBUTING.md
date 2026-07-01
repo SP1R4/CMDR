@@ -20,11 +20,22 @@ target Bash 3.2+ so they run on stock macOS as well as Linux).
 Run the linter and the test suite — both must pass (CI runs the same):
 
 ```bash
-shellcheck -x -S warning cmdr.sh cmdr_functions.sh install.sh tests/run.sh
+shellcheck -x -S warning cmdr.sh cmdr_functions.sh lib/*.sh install.sh tests/run.sh
 bash tests/run.sh
 ```
 
-If you add or change behavior, add matching assertions to `tests/run.sh`.
+If you add or change behavior, add matching assertions to `tests/run.sh`. There is
+also an optional [bats](https://github.com/bats-core/bats-core) suite —
+`bats tests/cmdr.bats` — which `tests/run.sh` runs automatically when `bats` is
+installed.
+
+## Code layout
+
+`cmdr.sh` is the entry point (path setup, argument parsing, dispatch, locking).
+The engine lives in `lib/*.sh`, one module per concern (`core`, `resolve`,
+`index`, `json_out`, `commands`, `run`, `import`, `flow`, …); `cmdr_functions.sh`
+is a thin loader that sources them in order. Add new functionality to the module
+that fits, or a new `lib/<name>.sh` wired into the loader's source list.
 
 ## Code style
 

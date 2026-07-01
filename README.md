@@ -1,6 +1,6 @@
 <div align="center">
 
-# CMDR v3.2
+# CMDR v3.3
 
 [![CI](https://github.com/SP1R4/CMDR/actions/workflows/ci.yml/badge.svg)](https://github.com/SP1R4/CMDR/actions/workflows/ci.yml) ![License](https://img.shields.io/github/license/SP1R4/CMDR?color=black) ![Top language](https://img.shields.io/github/languages/top/SP1R4/CMDR) ![Last commit](https://img.shields.io/github/last-commit/SP1R4/CMDR)
 
@@ -33,7 +33,10 @@ variables, playbooks, output capture, findings, and extensible command packs.
 | **Run History** | Recorded runs; `--history`; re-run with `-r last` |
 | **Encrypted Workspaces** | Lock a workspace to an encrypted blob at rest (age/gpg) |
 | **Danger Flag** | `--danger` commands always confirm before running, even with `-y` |
-| **Fuzzy Picker** | `--pick` (or bare `cmdr`) fuzzy-find a command via fzf |
+| **Fuzzy Picker** | `--pick` (or bare `cmdr`) fuzzy-find a command via fzf, with a live preview pane (`ctrl-n` dry-run, `ctrl-y` copy) |
+| **JSON Output** | `--json` on read commands (`-s`/`-f`/`--history`/`--findings`/`--host list`/`-W`/`--pack list`) for scripting |
+| **External Import** | `--import history\|tldr\|cheat\|file` pulls commands from shell history, tldr, cheat.sh, or a file (preview-first) |
+| **Fast Search** | Optional SQLite search index for large stores (`CMDR_INDEX=1`); JSON stays source of truth |
 | **Interactive Menu** | `-I` / `--menu` — optional tick-menu: checkbox-select commands/packs (fzf multi-select, bash fallback) |
 | **Workspaces** | Isolated command stores per engagement or project |
 | **Environment Variables** | Set `TARGET=10.10.10.1` once, use `{TARGET}` everywhere |
