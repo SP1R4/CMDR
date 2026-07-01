@@ -140,17 +140,18 @@ acquire_lock() {
     local tries=0 max_tries=50   # ~5s total at 0.1s per retry
     while true; do
         if mkdir "$LOCK_DIR" 2>/dev/null; then
-            echo "$$" > "$LOCK_DIR/pid" 2>/dev/null
+            echo "$$ $(date +%s)" > "$LOCK_DIR/pid" 2>/dev/null
             LOCK_ACQUIRED=true
             log_event "DEBUG" "Lock acquired (PID $$)"
             return 0
         fi
 
-        # Lock exists: reclaim it if the owning process is gone.
-        local pid
-        pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-        if [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
-            log_event "DEBUG" "Removing stale lock (PID $pid)"
+        # Lock exists: reclaim it only if the owner is gone AND the lock is older
+        # than the grace period. Reclaiming on a dead pid alone is racy — the pid
+        # may belong to a holder that just finished and was replaced, so removing
+        # the dir would delete a live successor's lock (see _lock_is_stale).
+        if _lock_is_stale "$LOCK_DIR"; then
+            log_event "DEBUG" "Removing stale lock"
             rm -rf "$LOCK_DIR"
             continue
         fi

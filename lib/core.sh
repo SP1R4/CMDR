@@ -51,6 +51,25 @@ _mktemp_beside() {
     mktemp "$dir/.cmdr.tmp.XXXXXX"
 }
 
+# True only when a lock dir belongs to a process that is gone AND has sat there
+# longer than the grace period. The pid file holds "PID EPOCH"; an older format
+# with no epoch is treated as not-stale (never reclaimed) to stay safe. This is
+# the guard that makes stale reclamation race-free: a lock that is merely being
+# handed off between short writers keeps a fresh epoch and is left alone.
+_lock_is_stale() {
+    local dir="$1" line pid ts now grace="${CMDR_LOCK_STALE:-30}"
+    line=$(cat "$dir/pid" 2>/dev/null) || return 1
+    case "$line" in
+        *" "*) pid=${line%% *}; ts=${line##* } ;;
+        *)     return 1 ;;
+    esac
+    [ -n "$pid" ] || return 1
+    ps -p "$pid" >/dev/null 2>&1 && return 1        # owner still alive
+    case "$ts" in ''|*[!0-9]*) return 1 ;; esac      # unparseable timestamp
+    now=$(date +%s)
+    [ "$((now - ts))" -ge "$grace" ]
+}
+
 # Run a store read-modify-write under the global mkdir mutex (same LOCK_DIR the
 # top-level CRUD lock uses). This protects the writes on the *run* path — run
 # history and captured env vars — which stay outside the coarse dispatch lock so
@@ -70,13 +89,17 @@ with_store_lock() {
     local tries=0 max_tries=50 held=false
     while true; do
         if mkdir "$LOCK_DIR" 2>/dev/null; then
-            echo "$$" > "$LOCK_DIR/pid" 2>/dev/null
+            echo "$$ $(date +%s)" > "$LOCK_DIR/pid" 2>/dev/null
             held=true
             break
         fi
-        local pid
-        pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-        if [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
+        # Reclaim only a lock that is BOTH owner-dead AND older than the grace
+        # period. Reclaiming purely on a dead pid is racy: the pid we read may
+        # belong to a holder that already finished and been replaced, so the
+        # rm -rf would delete a *live* successor's lock and let two writers run.
+        # A short-lived lock that is merely cycling always carries a fresh
+        # timestamp, so it is never mistaken for stale.
+        if _lock_is_stale "$LOCK_DIR"; then
             rm -rf "$LOCK_DIR"; continue
         fi
         tries=$((tries + 1))
