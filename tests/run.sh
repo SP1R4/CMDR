@@ -32,6 +32,9 @@ section "SYNTAX"
 for f in cmdr.sh cmdr_functions.sh cmdr_completion.bash install.sh; do
   okc "syntax:$f" 0 bash -n "$ROOT/$f"
 done
+for f in "$ROOT"/lib/*.sh; do
+  okc "syntax:lib/$(basename "$f")" 0 bash -n "$f"
+done
 okc "completion-sources" 0 bash -c "source '$ROOT/cmdr_completion.bash'"
 
 section "CRUD + SEARCH + ALIASES"
@@ -281,6 +284,88 @@ okc  "menu-no-tty-exit-I"   0  "$C" -I
 okc  "menu-no-tty-exit-alt" 0  "$C" --menu
 okg  "menu-no-tty-message"  "needs a terminal"  "$C" --interactive
 okg  "menu-help-listed"     "Interactive tick-menu"  "$C" -h
+
+# okj NAME -- cmd...   (stdout must be a single valid JSON document)
+okj() { local name="$1"; shift; if "$@" 2>/dev/null | jq -e . >/dev/null 2>&1; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED+=("$name (invalid JSON)"); fi; }
+
+section "JSON OUTPUT (--json)"
+newdata
+# Use echo-based commands so validate_command passes without the tool installed
+# (CI runners have neither nmap nor gobuster). Keywords live in tag/desc/alias.
+"$C" -a nmap-sv 'echo {TARGET} scan' net --desc 'svc scan' --alias scan >/dev/null 2>&1
+"$C" -a serve   'echo hi' dev >/dev/null 2>&1
+"$C" --host add 10.0.0.5 --name dc01 --os windows >/dev/null 2>&1
+"$C" --finding high dc01 'RCE' >/dev/null 2>&1
+"$C" -r serve >/dev/null 2>&1
+okj  "json-show"        "$C" -s --json
+okg  "json-show-key"    '"nmap-sv"'              "$C" -s --json
+okj  "json-search"      "$C" -f scan --json
+okg  "json-search-hit"  '"nmap-sv"'              "$C" -f scan --json
+okng "json-search-miss" '"serve"'               "$C" -f scan --json
+okj  "json-history"     "$C" --history --json
+okg  "json-history-tag" '"serve"'               "$C" --history --json
+okj  "json-findings"    "$C" --findings --json
+okg  "json-findings-t"  '"RCE"'                  "$C" --findings --json
+okj  "json-hosts"       "$C" --host list --json
+okg  "json-hosts-name"  '"dc01"'                 "$C" --host list --json
+okj  "json-workspaces"  "$C" -W --json
+okg  "json-ws-default"  '"default"'              "$C" -W --json
+okj  "json-packs"       "$C" --pack list --json
+
+section "IMPORT (--import)"
+newdata
+IMPF="$CMDR_DATA_DIR/snips.txt"
+printf '%s\n' '# comment' 'nmap -sV 10.0.0.1' 'python3 -m http.server' > "$IMPF"
+okg  "import-file-preview" "Preview"             "$C" -n --import file "$IMPF"
+okng "import-file-dryrun"  "nmap"                "$C" -s     # dry-run wrote nothing
+"$C" --import file "$IMPF" -y >/dev/null 2>&1
+okg  "import-file-tag1"   "nmap"                 "$C" -s
+okg  "import-file-tag2"   "python3"              "$C" -s
+"$C" -a serve 'echo x' dev >/dev/null 2>&1
+printf '%s\n' 'serve --foo' > "$CMDR_DATA_DIR/dup.txt"
+"$C" --import file "$CMDR_DATA_DIR/dup.txt" -y >/dev/null 2>&1
+okg  "import-uniquify"    "serve-2"              "$C" -s --json
+printf '%s' '{"gob":{"command":"gobuster","category":"web"}}' > "$CMDR_DATA_DIR/p.json"
+"$C" --import file "$CMDR_DATA_DIR/p.json" -y >/dev/null 2>&1
+okg  "import-json-cat"    '"category": *"web"'   "$C" -s --json
+okc  "import-bad-source"  1                      "$C" --import bogus
+HF="$CMDR_DATA_DIR/hist"; printf '%s\n' 'ls -la' 'git status' 'ls -la' > "$HF"
+okg  "import-history"     "git"    bash -c "HISTFILE='$HF' '$C' -n --import history 10"
+
+section "SEARCH INDEX PARITY (optional, sqlite3)"
+newdata
+"$C" -a a1 'echo {T} scan http' net --desc 'scan' --alias s1 >/dev/null 2>&1
+"$C" -a b1 'echo web {U} brute' web --desc 'brute' >/dev/null 2>&1
+"$C" -a c1 'echo serve' dev >/dev/null 2>&1
+if command -v sqlite3 >/dev/null 2>&1; then
+  IDX_OK=true
+  for kw in nmap web http scan zzz s1; do
+    A=$(CMDR_INDEX=0 "$C" -f "$kw" 2>&1 | _strip)
+    B=$(CMDR_INDEX=1 "$C" -f "$kw" 2>&1 | _strip)
+    [ "$A" = "$B" ] || IDX_OK=false
+  done
+  if [ "$IDX_OK" = true ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED+=("index parity mismatch"); fi
+else
+  echo "  (sqlite3 absent — index parity skipped)"
+fi
+
+section "RUN-PATH LOCK (concurrent history writes)"
+newdata
+"$C" -a ping1 'true' x >/dev/null 2>&1
+for i in 1 2 3 4 5 6; do ( "$C" -r ping1 >/dev/null 2>&1 ) & done; wait
+HN=$(jq 'length' "$CMDR_DATA_DIR/.cmdr_history.json" 2>/dev/null)
+if [ "$HN" = "6" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED+=("run-path lock (only $HN/6 history entries)"); fi
+
+section "BATS (optional)"
+if command -v bats >/dev/null 2>&1; then
+  if bats "$ROOT/tests/cmdr.bats" >/dev/null 2>&1; then
+    PASS=$((PASS+1))
+  else
+    FAIL=$((FAIL+1)); FAILED+=("bats suite (run 'bats tests/cmdr.bats' for detail)")
+  fi
+else
+  echo "  (bats not installed — skipped; 'bats tests/cmdr.bats' to run it)"
+fi
 
 echo ""
 echo "════════════════════════════════════════════"

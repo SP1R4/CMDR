@@ -9,7 +9,7 @@
 # See `cmdr -h` for full usage or `cmdr <flag> --help` for per-command help.
 # ============================================================================
 
-CMDR_VERSION="3.2.0"
+CMDR_VERSION="3.3.0"
 
 # Resolve the script's install directory (follows symlinks)
 SOURCE="${BASH_SOURCE[0]}"
@@ -84,6 +84,7 @@ VERBOSITY="INFO"
 DRY_RUN=false
 SAVE_OUTPUT=false
 USE_LOCAL=false
+CMDR_JSON=false
 CMDR_DESC=""
 CMDR_ALIASES=()
 CMDR_FORCE_YES=false
@@ -139,17 +140,18 @@ acquire_lock() {
     local tries=0 max_tries=50   # ~5s total at 0.1s per retry
     while true; do
         if mkdir "$LOCK_DIR" 2>/dev/null; then
-            echo "$$" > "$LOCK_DIR/pid" 2>/dev/null
+            echo "$$ $(date +%s)" > "$LOCK_DIR/pid" 2>/dev/null
             LOCK_ACQUIRED=true
             log_event "DEBUG" "Lock acquired (PID $$)"
             return 0
         fi
 
-        # Lock exists: reclaim it if the owning process is gone.
-        local pid
-        pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-        if [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
-            log_event "DEBUG" "Removing stale lock (PID $pid)"
+        # Lock exists: reclaim it only if the owner is gone AND the lock is older
+        # than the grace period. Reclaiming on a dead pid alone is racy — the pid
+        # may belong to a holder that just finished and was replaced, so removing
+        # the dir would delete a live successor's lock (see _lock_is_stale).
+        if _lock_is_stale "$LOCK_DIR"; then
+            log_event "DEBUG" "Removing stale lock"
             rm -rf "$LOCK_DIR"
             continue
         fi
@@ -196,6 +198,7 @@ main() {
             -n|--dry-run) DRY_RUN=true; log_event "DEBUG" "Dry-run mode enabled" ;;
             --local)   USE_LOCAL=true; log_event "DEBUG" "Local mode enabled" ;;
             --save)    SAVE_OUTPUT=true; log_event "DEBUG" "Save output enabled" ;;
+            --json)    CMDR_JSON=true; log_event "DEBUG" "JSON output enabled" ;;
         esac
     done
 
@@ -500,6 +503,21 @@ main() {
                 ;;
 
             # --- Import/Export ---
+            --import)
+                action="import_ext"; shift
+                [ "${1:-}" = "--help" ] && { display_subcommand_help "import"; exit 0; }
+                # source + up to one positional arg (page/topic/path/count); a
+                # trailing -y is captured as the force-yes modifier.
+                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
+                [ "$#" -ge 1 ] && [[ "${1:-}" != -* ]] && action_args+=("$1") && shift
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        -y) CMDR_FORCE_YES=true; shift ;;
+                        -v|-n|--dry-run|--local|--save|--json) shift ;;
+                        *) break ;;
+                    esac
+                done
+                ;;
             -x)
                 action="extract"; shift
                 [ "${1:-}" = "--help" ] && { display_subcommand_help "extract"; exit 0; }
@@ -538,7 +556,7 @@ main() {
             -V|--version)   echo "CMDR v${CMDR_VERSION}"; exit 0 ;;
 
             # Global modifiers (already pre-scanned)
-            -v|-n|--dry-run|--local|--save) shift ;;
+            -v|-n|--dry-run|--local|--save|--json) shift ;;
 
             *)
                 log_event "ERROR" "Invalid option: $1"
@@ -550,7 +568,7 @@ main() {
 
     # ----- Lock only mutating actions, for the duration of the write -----
     case "$action" in
-        add|edit|delete|set_env|clear_env|create_playbook|add_note|install|load_pack|undo|switch_workspace|trust_local|untrust_local|host_add|host_rm|add_finding|lock_workspace|unlock_workspace|flow_import|set_secret|clear_secret)
+        add|edit|delete|set_env|clear_env|create_playbook|add_note|install|load_pack|undo|switch_workspace|trust_local|untrust_local|host_add|host_rm|add_finding|lock_workspace|unlock_workspace|flow_import|set_secret|clear_secret|import_ext)
             acquire_lock ;;
     esac
 
@@ -623,6 +641,7 @@ main() {
 
         # Import/Export & Packs
         extract)          extract_commands "${action_args[@]}" ;;
+        import_ext)       import_external "${action_args[@]}" ;;
         logs)             extract_logs "${action_args[@]}" ;;
         install)          install_commands "${action_args[@]}" ;;
         list_packs)       list_packs ;;
