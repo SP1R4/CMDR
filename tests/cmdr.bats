@@ -30,13 +30,13 @@ teardown() {
 }
 
 @test "--json produces valid JSON for show" {
-    "$C" -a nmap-sv 'nmap {T} -sV' net >/dev/null
+    "$C" -a nmap-sv 'echo {T} scan' net >/dev/null
     run bash -c "'$C' -s --json | jq -e '.\"nmap-sv\".command'"
     [ "$status" -eq 0 ]
 }
 
 @test "search --json filters to matching commands only" {
-    "$C" -a nmap-sv 'nmap {T} -sV' net --alias scan >/dev/null
+    "$C" -a nmap-sv 'echo {T} scan' net --alias scan >/dev/null
     "$C" -a serve 'echo hi' dev >/dev/null
     run bash -c "'$C' -f scan --json | jq -e 'has(\"nmap-sv\") and (has(\"serve\")|not)'"
     [ "$status" -eq 0 ]
@@ -65,8 +65,8 @@ teardown() {
 
 @test "search index matches the jq path (when sqlite3 is present)" {
     if ! command -v sqlite3 >/dev/null 2>&1; then skip "sqlite3 not installed"; fi
-    "$C" -a a1 'nmap {T} -sV' net --alias s1 >/dev/null
-    "$C" -a b1 'gobuster dir -u {U}' web >/dev/null
+    "$C" -a a1 'echo {T} scan' net --alias s1 >/dev/null
+    "$C" -a b1 'echo web {U}' web >/dev/null
     for kw in nmap web zzz s1; do
         a="$(CMDR_INDEX=0 "$C" -f "$kw" 2>&1)"
         b="$(CMDR_INDEX=1 "$C" -f "$kw" 2>&1)"

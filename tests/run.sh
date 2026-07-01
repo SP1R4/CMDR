@@ -290,7 +290,9 @@ okj() { local name="$1"; shift; if "$@" 2>/dev/null | jq -e . >/dev/null 2>&1; t
 
 section "JSON OUTPUT (--json)"
 newdata
-"$C" -a nmap-sv 'nmap {TARGET} -sV' net --desc 'svc scan' --alias scan >/dev/null 2>&1
+# Use echo-based commands so validate_command passes without the tool installed
+# (CI runners have neither nmap nor gobuster). Keywords live in tag/desc/alias.
+"$C" -a nmap-sv 'echo {TARGET} scan' net --desc 'svc scan' --alias scan >/dev/null 2>&1
 "$C" -a serve   'echo hi' dev >/dev/null 2>&1
 "$C" --host add 10.0.0.5 --name dc01 --os windows >/dev/null 2>&1
 "$C" --finding high dc01 'RCE' >/dev/null 2>&1
@@ -332,9 +334,9 @@ okg  "import-history"     "git"    bash -c "HISTFILE='$HF' '$C' -n --import hist
 
 section "SEARCH INDEX PARITY (optional, sqlite3)"
 newdata
-"$C" -a a1 'nmap {T} -sV' net --desc 'scan' --alias s1 >/dev/null 2>&1
-"$C" -a b1 'gobuster dir -u {U}' web --desc 'brute' >/dev/null 2>&1
-"$C" -a c1 'python3 -m http.server' dev >/dev/null 2>&1
+"$C" -a a1 'echo {T} scan http' net --desc 'scan' --alias s1 >/dev/null 2>&1
+"$C" -a b1 'echo web {U} brute' web --desc 'brute' >/dev/null 2>&1
+"$C" -a c1 'echo serve' dev >/dev/null 2>&1
 if command -v sqlite3 >/dev/null 2>&1; then
   IDX_OK=true
   for kw in nmap web http scan zzz s1; do
